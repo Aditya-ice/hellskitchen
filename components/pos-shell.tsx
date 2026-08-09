@@ -28,6 +28,8 @@ import { ingredients, menuItems, staff } from "@/data/demo";
 import { orderTotal, recommendDishes, recommendTables } from "@/lib/decision-engine";
 import type { GuestProfile, TableStatus } from "@/lib/domain";
 import { usePos } from "@/components/pos-provider";
+import { VoiceInput } from "@/components/voice-input";
+import { GuestTools } from "@/components/guest-tools";
 
 type Tab = "arrivals" | "floor" | "order" | "guest";
 
@@ -129,6 +131,7 @@ export function PosShell() {
               <p className="text-xl font-black">12m</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Avg wait</p>
             </div>
+            <GuestTools />
             <button
               type="button"
               onClick={pos.resetDemo}
@@ -618,17 +621,12 @@ export function PosShell() {
                 )}
                 {selectedGuest && selectedOrder && (
                   <div className="mt-5 border-t border-line pt-4">
-                    <label className="text-xs font-black uppercase tracking-[0.12em] text-ink-muted">
-                      Order notes
-                    </label>
-                    <textarea
+                    <VoiceInput
+                      label="Order notes"
                       value={selectedOrder.guestNotes}
-                      onChange={(event) =>
-                        pos.updateOrderNotes(selectedGuest.id, event.target.value)
-                      }
+                      onChange={(notes) => pos.updateOrderNotes(selectedGuest.id, notes)}
                       placeholder="e.g. Fire mains after starters, sauce on side…"
                       rows={2}
-                      className="mt-2 w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none focus:border-accent"
                     />
                   </div>
                 )}
@@ -698,17 +696,12 @@ export function PosShell() {
                   </div>
                 </div>
                 <div className="mt-5">
-                  <label className="text-xs font-black uppercase tracking-[0.12em] text-ink-muted">
-                    Notes for the team
-                  </label>
-                  <textarea
+                  <VoiceInput
+                    label="Notes for the team"
                     value={selectedGuest.notes}
-                    onChange={(event) =>
-                      pos.updateGuestNotes(selectedGuest.id, event.target.value)
-                    }
+                    onChange={(notes) => pos.updateGuestNotes(selectedGuest.id, notes)}
                     placeholder="Capture the guest's seating needs, occasion, preferences, or pacing…"
                     rows={4}
-                    className="mt-2 w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none focus:border-accent"
                   />
                 </div>
               </section>
