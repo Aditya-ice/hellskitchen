@@ -118,6 +118,17 @@ export function PosShell() {
     setWalkInOpen(false);
   }
 
+  if (!pos.hydrated) {
+    return (
+      <div className="grid min-h-[calc(100vh-4rem)] place-items-center">
+        <div className="text-center">
+          <Sparkles className="mx-auto size-6 animate-pulse text-accent" />
+          <p className="mt-3 text-sm font-black">Loading service state…</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-[calc(100vh-4rem)]">
       <div className="border-b border-line bg-white">
@@ -626,9 +637,25 @@ export function PosShell() {
                             <p className="mt-0.5 text-xs text-ink-muted">${item.price} each</p>
                           </div>
                           <div className="flex items-center gap-2">
-                            <button type="button" onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, item.id)} className="grid size-6 place-items-center rounded-full border border-line"><Minus className="size-3" /></button>
+                            <button
+                              type="button"
+                              disabled={selectedOrder?.status === "sent"}
+                              onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, item.id)}
+                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Remove one ${item.name}`}
+                            >
+                              <Minus className="size-3" />
+                            </button>
                             <span className="w-4 text-center text-xs font-black">{line.quantity}</span>
-                            <button type="button" onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)} className="grid size-6 place-items-center rounded-full border border-line"><Plus className="size-3" /></button>
+                            <button
+                              type="button"
+                              disabled={selectedOrder?.status === "sent"}
+                              onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
+                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Add one ${item.name}`}
+                            >
+                              <Plus className="size-3" />
+                            </button>
                           </div>
                         </div>
                       );
@@ -643,6 +670,7 @@ export function PosShell() {
                       onChange={(notes) => pos.updateOrderNotes(selectedGuest.id, notes)}
                       placeholder="e.g. Fire mains after starters, sauce on side…"
                       rows={2}
+                      disabled={selectedOrder.status === "sent"}
                     />
                   </div>
                 )}

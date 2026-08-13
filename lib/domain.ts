@@ -91,7 +91,6 @@ export interface PosState {
   tables: Table[];
   guests: GuestProfile[];
   orders: Order[];
-  selectedGuestId: string | null;
   activity: ActivityEvent[];
 }
 
