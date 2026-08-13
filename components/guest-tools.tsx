@@ -9,8 +9,13 @@ import {
   MapPin,
   X,
 } from "lucide-react";
-import { menuItems, restaurant } from "@/data/demo";
+import {
+  fallbackDishContext,
+  menuItems,
+  restaurant,
+} from "@/data/demo";
 import type { TavilyContext } from "@/lib/domain";
+import { ensureDemoSession } from "@/lib/demo-session-client";
 
 type Tool = "dish" | "travel" | null;
 
@@ -19,6 +24,7 @@ export function GuestTools() {
   const [dishId, setDishId] = useState(menuItems[0].id);
   const [context, setContext] = useState<TavilyContext | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const aid = process.env.NEXT_PUBLIC_STAY22_AID ?? "";
   const venue = process.env.NEXT_PUBLIC_RESTAURANT_VENUE ?? restaurant.venue;
   const mapUrl = `https://www.stay22.com/embed/gm?aid=${encodeURIComponent(aid)}&address=${encodeURIComponent(venue)}&venue=${encodeURIComponent(restaurant.name)}`;
@@ -28,13 +34,39 @@ export function GuestTools() {
     if (!dish) return;
     setLoading(true);
     setContext(null);
+    setError(null);
     try {
+      await ensureDemoSession();
       const response = await fetch("/api/tavily/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dish: `${dish.name}: ${dish.description}` }),
+        body: JSON.stringify({ dishId: dish.id }),
       });
-      setContext((await response.json()) as TavilyContext);
+      const payload = (await response.json().catch(() => null)) as
+        | Partial<TavilyContext> & { error?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Dish context is temporarily unavailable.");
+      }
+      if (
+        typeof payload?.isFallback !== "boolean" ||
+        !Array.isArray(payload.sources) ||
+        (payload.answer !== null && typeof payload.answer !== "string")
+      ) {
+        throw new Error("Dish context returned an invalid response.");
+      }
+      setContext(payload as TavilyContext);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Dish context is temporarily unavailable.",
+      );
+      setContext({
+        answer: fallbackDishContext,
+        sources: [],
+        isFallback: true,
+      });
     } finally {
       setLoading(false);
     }
@@ -108,6 +140,14 @@ export function GuestTools() {
                     {loading ? <LoaderCircle className="size-4 animate-spin" /> : "Research"}
                   </button>
                 </div>
+                {error && (
+                  <p
+                    role="alert"
+                    className="mt-4 rounded-xl bg-warning/10 p-3 text-xs font-bold text-[#76510c]"
+                  >
+                    {error} Showing seeded guidance instead.
+                  </p>
+                )}
                 {context && (
                   <div className="mt-5">
                     <div className="rounded-2xl border border-line bg-white p-4">

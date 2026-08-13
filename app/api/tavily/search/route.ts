@@ -1,12 +1,33 @@
 import { tavily } from "@tavily/core";
-import { fallbackDishContext } from "@/data/demo";
+import { fallbackDishContext, menuItems } from "@/data/demo";
+import {
+  enforceRateLimit,
+  requireDemoSession,
+  requireSameOrigin,
+} from "@/lib/api-guard";
 
 export async function POST(request: Request) {
-  const body = (await request.json()) as { dish?: string; query?: string };
-  const query = body.query?.trim() || body.dish?.trim();
+  const originError = requireSameOrigin(request);
+  if (originError) return originError;
+  const sessionError = requireDemoSession(request);
+  if (sessionError) return sessionError;
+  const rateLimitError = enforceRateLimit(request, "tavily-search", 10, 60_000);
+  if (rateLimitError) return rateLimitError;
 
-  if (!query) {
-    return Response.json({ error: "A dish or ingredient question is required." }, { status: 400 });
+  let body: { dishId?: unknown };
+  try {
+    body = (await request.json()) as { dishId?: unknown };
+  } catch {
+    return Response.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  if (typeof body.dishId !== "string" || body.dishId.length > 80) {
+    return Response.json({ error: "A valid dish ID is required." }, { status: 400 });
+  }
+
+  const dish = menuItems.find((item) => item.id === body.dishId);
+  if (!dish) {
+    return Response.json({ error: "Dish not found." }, { status: 404 });
   }
 
   const apiKey = process.env.TAVILY_API_KEY;
@@ -21,7 +42,7 @@ export async function POST(request: Request) {
   try {
     const client = tavily({ apiKey });
     const result = await client.search(
-      `Current culinary background, seasonality, and guest-friendly description for: ${query}. Do not provide medical or allergy safety claims.`,
+      `Current culinary background, seasonality, and guest-friendly description for: ${dish.name}: ${dish.description}. Do not provide medical or allergy safety claims.`,
       {
         searchDepth: "basic",
         maxResults: 3,

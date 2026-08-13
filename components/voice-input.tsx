@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Waves } from "lucide-react";
 import type { RealtimeConnection } from "@elevenlabs/client";
+import { ensureDemoSession } from "@/lib/demo-session-client";
 
 interface VoiceInputProps {
   label: string;
@@ -22,6 +23,7 @@ export function VoiceInput({
   disabled = false,
 }: VoiceInputProps) {
   const [recording, setRecording] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState("Type a note or use ElevenLabs voice");
   const connection = useRef<RealtimeConnection | null>(null);
   const baseText = useRef("");
@@ -29,10 +31,15 @@ export function VoiceInput({
   useEffect(() => () => connection.current?.close(), []);
 
   async function start() {
+    if (connecting || recording || disabled) return;
+    connection.current?.close();
+    connection.current = null;
+    setConnecting(true);
     setStatus("Connecting to ElevenLabs…");
     baseText.current = value.trim();
 
     try {
+      await ensureDemoSession();
       const response = await fetch("/api/elevenlabs/token", { cache: "no-store" });
       const body = (await response.json()) as { token?: string; error?: string };
       if (!response.ok || !body.token) throw new Error(body.error ?? "Voice unavailable");
@@ -53,6 +60,7 @@ export function VoiceInput({
       });
 
       live.on(RealtimeEvents.OPEN, () => {
+        setConnecting(false);
         setRecording(true);
         setStatus("Listening — speak naturally");
       });
@@ -65,15 +73,23 @@ export function VoiceInput({
         onChange(baseText.current);
       });
       live.on(RealtimeEvents.ERROR, (data) => {
+        live.close();
+        if (connection.current === live) connection.current = null;
+        setConnecting(false);
         setStatus(data.error || "Voice connection failed. Continue typing.");
         setRecording(false);
       });
       live.on(RealtimeEvents.CLOSE, () => {
+        if (connection.current === live) connection.current = null;
+        setConnecting(false);
         setRecording(false);
         setStatus("Voice stopped — you can edit the transcript");
       });
       connection.current = live;
     } catch (error) {
+      connection.current?.close();
+      connection.current = null;
+      setConnecting(false);
       setRecording(false);
       setStatus(error instanceof Error ? `${error.message} Continue typing.` : "Voice unavailable. Continue typing.");
     }
@@ -94,7 +110,7 @@ export function VoiceInput({
         <button
           type="button"
           onClick={recording ? stop : start}
-          disabled={disabled}
+          disabled={disabled || connecting}
           className={`flex items-center gap-2 rounded-full px-3 py-2 text-xs font-black ${
             recording
               ? "pulse-ring bg-accent text-white"
@@ -102,7 +118,7 @@ export function VoiceInput({
           }`}
         >
           {recording ? <Square className="size-3 fill-current" /> : <Mic className="size-3.5" />}
-          {recording ? "Stop" : "Voice"}
+          {recording ? "Stop" : connecting ? "Connecting…" : "Voice"}
         </button>
       </div>
       <textarea
