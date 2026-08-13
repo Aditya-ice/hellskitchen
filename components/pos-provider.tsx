@@ -20,7 +20,7 @@ import type {
 const STORAGE_KEY = "ember-pos-state-v2";
 const CHANNEL_KEY = "ember-pos-live-v2";
 
-function freshState(): PosState {
+export function createInitialPosState(): PosState {
   return {
     tables: demoTables.map((table) => ({ ...table })),
     guests: demoGuests.map((guest) => ({
@@ -39,7 +39,7 @@ function freshState(): PosState {
   };
 }
 
-type SharedAction =
+export type SharedAction =
   | { id: string; at: string; type: "check-in"; guestId: string }
   | { id: string; at: string; type: "add-walk-in"; guest: GuestProfile }
   | { id: string; at: string; type: "update-guest-notes"; guestId: string; notes: string }
@@ -49,6 +49,12 @@ type SharedAction =
   | { id: string; at: string; type: "update-order-notes"; guestId: string; notes: string }
   | { id: string; at: string; type: "send-order"; guestId: string }
   | { id: string; at: string; type: "reset" };
+
+export type SharedActionInput = SharedAction extends infer Action
+  ? Action extends SharedAction
+    ? Omit<Action, "id" | "at">
+    : never
+  : never;
 
 interface SharedMessage {
   action: SharedAction;
@@ -80,7 +86,7 @@ function activity(action: SharedAction, label: string, detail: string): Activity
   };
 }
 
-function reducePosState(current: PosState, action: SharedAction): PosState {
+export function reducePosState(current: PosState, action: SharedAction): PosState {
   switch (action.type) {
     case "check-in": {
       const guest = current.guests.find((item) => item.id === action.guestId);
@@ -267,7 +273,7 @@ function reducePosState(current: PosState, action: SharedAction): PosState {
       };
     }
     case "reset":
-      return freshState();
+      return createInitialPosState();
   }
 }
 
@@ -302,7 +308,7 @@ function persist(state: PosState) {
   }
 }
 
-function newAction<T extends Omit<SharedAction, "id" | "at">>(
+function newAction<T extends SharedActionInput>(
   action: T,
 ): T & { id: string; at: string } {
   return {
@@ -313,7 +319,7 @@ function newAction<T extends Omit<SharedAction, "id" | "at">>(
 }
 
 export function PosProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<PosState>(freshState);
+  const [state, setState] = useState<PosState>(createInitialPosState);
   const [selectedGuestId, setSelectedGuestId] = useState<string | null>(
     demoGuests[0]?.id ?? null,
   );
