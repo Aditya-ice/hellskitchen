@@ -243,15 +243,18 @@ export function PosShell() {
                 {filteredGuests.map((guest) => {
                   const table = pos.tables.find((item) => item.seatedGuestId === guest.id);
                   return (
-                    <button
+                    <div
                       key={guest.id}
-                      type="button"
-                      onClick={() => chooseGuest(guest.id)}
-                      className={`grid w-full grid-cols-[1fr_auto] gap-3 p-4 text-left hover:bg-surface-muted/55 ${
+                      className={`grid grid-cols-[1fr_auto] gap-3 p-4 hover:bg-surface-muted/55 ${
                         guest.id === selectedGuest?.id ? "bg-accent/5" : ""
                       }`}
                     >
-                      <div className="flex min-w-0 items-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => chooseGuest(guest.id)}
+                        className="flex min-w-0 items-start gap-3 text-left"
+                        aria-label={`Select ${guest.name}, party of ${guest.partySize}`}
+                      >
                         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-navy text-xs font-black text-white">
                           {guest.name.split(" ").map((part) => part[0]).join("")}
                         </span>
@@ -277,23 +280,27 @@ export function PosShell() {
                             ))}
                           </div>
                         </div>
-                      </div>
+                      </button>
                       <div className="flex items-center gap-2">
                         {guest.status === "expected" && (
-                          <span
-                            role="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              pos.checkInGuest(guest.id);
-                            }}
+                          <button
+                            type="button"
+                            onClick={() => pos.checkInGuest(guest.id)}
                             className="rounded-full border border-line px-3 py-2 text-xs font-black hover:border-success hover:text-success"
                           >
                             Check in
-                          </span>
+                          </button>
                         )}
-                        <ChevronRight className="size-4 text-ink-muted" />
+                        <button
+                          type="button"
+                          onClick={() => chooseGuest(guest.id)}
+                          className="grid size-8 place-items-center rounded-full hover:bg-white"
+                          aria-label={`View ${guest.name}`}
+                        >
+                          <ChevronRight className="size-4 text-ink-muted" />
+                        </button>
                       </div>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -379,7 +386,9 @@ export function PosShell() {
                       <span>
                         <span className="eyebrow text-white/50">Next step</span>
                         <span className="mt-1 block text-lg font-black">
-                          {selectedGuest.status === "expected" ? "Check in this guest" : "Build their order"}
+                          {selectedGuest.status === "expected"
+                            ? "Check in and find a table"
+                            : "Build their order"}
                         </span>
                       </span>
                       <ArrowRight className="size-5" />
