@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { demoGuests, demoOrders, demoTables } from "@/data/demo";
 import {
+  canSeatGuestAtTable,
   estimateWait,
   orderTotal,
   recommendDishes,
@@ -31,6 +32,17 @@ describe("table recommendations", () => {
   it("returns no wait when the top table is already available", () => {
     const maya = demoGuests.find((guest) => guest.id === "guest-maya")!;
     expect(estimateWait(maya, demoTables)).toBe(0);
+  });
+
+  it("only allows a checked-in guest at an available compatible table", () => {
+    const maya = demoGuests.find((guest) => guest.id === "guest-maya")!;
+    const jordan = demoGuests.find((guest) => guest.id === "guest-jordan")!;
+    const accessibleTable = demoTables.find((table) => table.id === "t2")!;
+    const occupiedTable = demoTables.find((table) => table.id === "t3")!;
+
+    expect(canSeatGuestAtTable(maya, accessibleTable)).toBe(true);
+    expect(canSeatGuestAtTable(jordan, accessibleTable)).toBe(false);
+    expect(canSeatGuestAtTable(maya, occupiedTable)).toBe(false);
   });
 });
 

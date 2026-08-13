@@ -10,6 +10,19 @@ import type {
 const clampScore = (score: number) => Math.max(0, Math.min(100, Math.round(score)));
 const normalize = (value: string) => value.trim().toLowerCase();
 
+export function canSeatGuestAtTable(guest: GuestProfile, table: Table) {
+  const mayBeSeated = ["waiting", "seated", "ordered"].includes(guest.status);
+  const needsAccessible = guest.seatingPreferences.includes("accessible");
+
+  return (
+    mayBeSeated &&
+    table.status === "available" &&
+    table.seatedGuestId === null &&
+    table.capacity >= guest.partySize &&
+    (!needsAccessible || table.accessible)
+  );
+}
+
 export function recommendTables(
   guest: GuestProfile,
   tables: Table[],

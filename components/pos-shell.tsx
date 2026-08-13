@@ -79,6 +79,16 @@ export function PosShell() {
   const tableRecommendations = selectedGuest
     ? recommendTables(selectedGuest, pos.tables)
     : [];
+  const seatableRecommendations = tableRecommendations.filter(
+    (recommendation) =>
+      recommendation.eligible &&
+      pos.tables.some(
+        (table) =>
+          table.id === recommendation.id &&
+          table.status === "available" &&
+          table.seatedGuestId === null,
+      ),
+  );
   const dishRecommendations = selectedGuest ? recommendDishes(selectedGuest) : [];
 
   const filteredGuests = useMemo(
@@ -314,7 +324,7 @@ export function PosShell() {
                         <Sparkles className="size-5 text-warning" />
                       </div>
                       <div className="space-y-3 p-4">
-                        {tableRecommendations.filter((item) => item.eligible).slice(0, 3).map((recommendation, index) => {
+                        {seatableRecommendations.slice(0, 3).map((recommendation, index) => {
                           const table = pos.tables.find((item) => item.id === recommendation.id)!;
                           return (
                             <div key={table.id} className={`rounded-xl border p-3 ${index === 0 ? "border-success bg-success/5" : "border-line"}`}>
@@ -346,7 +356,13 @@ export function PosShell() {
                   ) : (
                     <button
                       type="button"
-                      onClick={() => setActiveTab("order")}
+                      onClick={() => {
+                        if (selectedGuest.status === "expected") {
+                          pos.checkInGuest(selectedGuest.id);
+                        } else {
+                          setActiveTab("order");
+                        }
+                      }}
                       className="flex w-full items-center justify-between rounded-2xl bg-navy p-5 text-left text-white"
                     >
                       <span>
@@ -413,7 +429,7 @@ export function PosShell() {
                   {selectedGuest ? `Party of ${selectedGuest.partySize}` : "Choose a party from Arrivals"}
                 </p>
                 <div className="mt-4 space-y-2">
-                  {tableRecommendations.filter((item) => item.eligible).slice(0, 4).map((recommendation) => {
+                  {seatableRecommendations.slice(0, 4).map((recommendation) => {
                     const table = pos.tables.find((item) => item.id === recommendation.id)!;
                     return (
                       <button

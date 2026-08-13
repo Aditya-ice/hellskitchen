@@ -11,6 +11,7 @@ import {
 } from "react";
 import { demoGuests, demoOrders, demoTables } from "@/data/demo";
 import type { ActivityEvent, GuestProfile, PosState } from "@/lib/domain";
+import { canSeatGuestAtTable } from "@/lib/decision-engine";
 
 const STORAGE_KEY = "ember-pos-state-v1";
 const CHANNEL_KEY = "ember-pos-live";
@@ -104,6 +105,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     (id: string) =>
       commit((current) => {
         const guest = current.guests.find((item) => item.id === id);
+        if (!guest || guest.status !== "expected") return current;
+
         return {
           ...current,
           guests: current.guests.map((item) =>
@@ -162,6 +165,16 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       commit((current) => {
         const guest = current.guests.find((item) => item.id === guestId);
         const currentTable = current.tables.find((table) => table.seatedGuestId === guestId);
+        const targetTable = current.tables.find((table) => table.id === tableId);
+        if (
+          !guest ||
+          !targetTable ||
+          currentTable?.id === targetTable.id ||
+          !canSeatGuestAtTable(guest, targetTable)
+        ) {
+          return current;
+        }
+
         const existingOrder = current.orders.find((order) => order.guestId === guestId);
         const now = new Date().toISOString();
         return {
