@@ -9,13 +9,8 @@ import {
   MapPin,
   X,
 } from "lucide-react";
-import {
-  fallbackDishContext,
-  menuItems,
-  restaurant,
-} from "@/data/demo";
-import type { TavilyContext } from "@/lib/domain";
-import { ensureDemoSession } from "@/lib/demo-session-client";
+import { menuItems, restaurant, type TavilyContext } from "@hellskitchen/shared";
+import { apiFetch } from "@/lib/api-client";
 
 type Tool = "dish" | "travel" | null;
 
@@ -36,37 +31,13 @@ export function GuestTools() {
     setContext(null);
     setError(null);
     try {
-      await ensureDemoSession();
-      const response = await fetch("/api/tavily/search", {
+      const data = await apiFetch<TavilyContext>("/v1/integrations/tavily/search", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dishId: dish.id }),
       });
-      const payload = (await response.json().catch(() => null)) as
-        | Partial<TavilyContext> & { error?: string }
-        | null;
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Dish context is temporarily unavailable.");
-      }
-      if (
-        typeof payload?.isFallback !== "boolean" ||
-        !Array.isArray(payload.sources) ||
-        (payload.answer !== null && typeof payload.answer !== "string")
-      ) {
-        throw new Error("Dish context returned an invalid response.");
-      }
-      setContext(payload as TavilyContext);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : "Dish context is temporarily unavailable.",
-      );
-      setContext({
-        answer: fallbackDishContext,
-        sources: [],
-        isFallback: true,
-      });
+      setContext(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dish context is temporarily unavailable.");
     } finally {
       setLoading(false);
     }
@@ -141,11 +112,8 @@ export function GuestTools() {
                   </button>
                 </div>
                 {error && (
-                  <p
-                    role="alert"
-                    className="mt-4 rounded-xl bg-warning/10 p-3 text-xs font-bold text-[#76510c]"
-                  >
-                    {error} Showing seeded guidance instead.
+                  <p className="mt-4 rounded-xl bg-critical/10 p-3 text-xs font-bold text-critical">
+                    {error}
                   </p>
                 )}
                 {context && (

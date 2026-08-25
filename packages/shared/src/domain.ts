@@ -88,6 +88,7 @@ export interface ActivityEvent {
 }
 
 export interface PosState {
+  version: number;
   tables: Table[];
   guests: GuestProfile[];
   orders: Order[];
@@ -116,3 +117,20 @@ export interface TavilyContext {
   sources: TavilySource[];
   isFallback: boolean;
 }
+
+export type SharedAction =
+  | { id: string; at: string; type: "check-in"; guestId: string }
+  | { id: string; at: string; type: "add-walk-in"; guest: GuestProfile }
+  | { id: string; at: string; type: "update-guest-notes"; guestId: string; notes: string }
+  | { id: string; at: string; type: "seat-guest"; guestId: string; tableId: string }
+  | { id: string; at: string; type: "add-order-item"; guestId: string; menuItemId: string }
+  | { id: string; at: string; type: "remove-order-item"; guestId: string; menuItemId: string }
+  | { id: string; at: string; type: "update-order-notes"; guestId: string; notes: string }
+  | { id: string; at: string; type: "send-order"; guestId: string }
+  | { id: string; at: string; type: "reset" };
+
+export type SharedActionInput = SharedAction extends infer Action
+  ? Action extends SharedAction
+    ? Omit<Action, "id" | "at">
+    : never
+  : never;

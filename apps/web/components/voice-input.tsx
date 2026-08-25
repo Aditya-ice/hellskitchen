@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Waves } from "lucide-react";
 import type { RealtimeConnection } from "@elevenlabs/client";
-import { ensureDemoSession } from "@/lib/demo-session-client";
+import { apiFetch } from "@/lib/api-client";
 
 interface VoiceInputProps {
   label: string;
@@ -23,30 +23,29 @@ export function VoiceInput({
   disabled = false,
 }: VoiceInputProps) {
   const [recording, setRecording] = useState(false);
-  const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState("Type a note or use ElevenLabs voice");
   const connection = useRef<RealtimeConnection | null>(null);
   const baseText = useRef("");
+  const connectingRef = useRef(false);
 
   useEffect(() => () => connection.current?.close(), []);
 
   async function start() {
-    if (connecting || recording || disabled) return;
-    connection.current?.close();
-    connection.current = null;
-    setConnecting(true);
+    if (connectingRef.current || recording) return;
+    connectingRef.current = true;
     setStatus("Connecting to ElevenLabs…");
     baseText.current = value.trim();
 
     try {
-      await ensureDemoSession();
-      const response = await fetch("/api/elevenlabs/token", { cache: "no-store" });
-      const body = (await response.json()) as { token?: string; error?: string };
-      if (!response.ok || !body.token) throw new Error(body.error ?? "Voice unavailable");
+      const data = await apiFetch<{ token: string; configured: boolean }>(
+        "/v1/integrations/elevenlabs/token",
+      );
 
-      const { Scribe, RealtimeEvents, CommitStrategy } = await import("@elevenlabs/client");
+      const { Scribe, RealtimeEvents, CommitStrategy } = await import(
+        "@elevenlabs/client"
+      );
       const live = Scribe.connect({
-        token: body.token,
+        token: data.token,
         modelId: "scribe_v2_realtime",
         commitStrategy: CommitStrategy.VAD,
         vadSilenceThresholdSecs: 1.1,
@@ -60,8 +59,8 @@ export function VoiceInput({
       });
 
       live.on(RealtimeEvents.OPEN, () => {
-        setConnecting(false);
         setRecording(true);
+        connectingRef.current = false;
         setStatus("Listening — speak naturally");
       });
       live.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data) => {
@@ -73,25 +72,24 @@ export function VoiceInput({
         onChange(baseText.current);
       });
       live.on(RealtimeEvents.ERROR, (data) => {
-        live.close();
-        if (connection.current === live) connection.current = null;
-        setConnecting(false);
         setStatus(data.error || "Voice connection failed. Continue typing.");
         setRecording(false);
+        connectingRef.current = false;
       });
       live.on(RealtimeEvents.CLOSE, () => {
-        if (connection.current === live) connection.current = null;
-        setConnecting(false);
         setRecording(false);
+        connectingRef.current = false;
         setStatus("Voice stopped — you can edit the transcript");
       });
       connection.current = live;
     } catch (error) {
-      connection.current?.close();
-      connection.current = null;
-      setConnecting(false);
       setRecording(false);
-      setStatus(error instanceof Error ? `${error.message} Continue typing.` : "Voice unavailable. Continue typing.");
+      connectingRef.current = false;
+      setStatus(
+        error instanceof Error
+          ? `${error.message} Continue typing.`
+          : "Voice unavailable. Continue typing.",
+      );
     }
   }
 
@@ -99,6 +97,7 @@ export function VoiceInput({
     connection.current?.close();
     connection.current = null;
     setRecording(false);
+    connectingRef.current = false;
   }
 
   return (
@@ -109,25 +108,25 @@ export function VoiceInput({
         </label>
         <button
           type="button"
+          disabled={disabled}
           onClick={recording ? stop : start}
-          disabled={disabled || connecting}
-          className={`flex items-center gap-2 rounded-full px-3 py-2 text-xs font-black ${
+          className={`flex items-center gap-2 rounded-full px-3 py-2 text-xs font-black disabled:opacity-40 ${
             recording
               ? "pulse-ring bg-accent text-white"
-              : "border border-line bg-white hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+              : "border border-line bg-white hover:border-accent hover:text-accent"
           }`}
         >
           {recording ? <Square className="size-3 fill-current" /> : <Mic className="size-3.5" />}
-          {recording ? "Stop" : connecting ? "Connecting…" : "Voice"}
+          {recording ? "Stop" : "Voice"}
         </button>
       </div>
       <textarea
         value={value}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         rows={rows}
-        disabled={disabled}
-        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10"
+        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10 disabled:bg-surface-muted disabled:text-ink-muted"
       />
       <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
         <Waves className="size-3" />

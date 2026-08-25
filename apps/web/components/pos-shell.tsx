@@ -24,9 +24,16 @@ import {
   Users,
   UtensilsCrossed,
 } from "lucide-react";
-import { ingredients, menuItems, staff } from "@/data/demo";
-import { orderTotal, recommendDishes, recommendTables } from "@/lib/decision-engine";
-import type { GuestProfile, TableStatus } from "@/lib/domain";
+import {
+  type GuestProfile,
+  ingredients,
+  menuItems,
+  orderTotal,
+  recommendDishes,
+  recommendTables,
+  staff,
+  type TableStatus,
+} from "@hellskitchen/shared";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
 import { GuestTools } from "@/components/guest-tools";
@@ -140,6 +147,11 @@ export function PosShell() {
             </h1>
           </div>
           <div className="hidden items-center gap-5 md:flex">
+            {!pos.serverConnected && (
+              <span className="rounded-full bg-warning/15 px-3 py-1.5 text-xs font-bold text-[#8a5b06]">
+                Connecting to API…
+              </span>
+            )}
             <div>
               <p className="text-xl font-black">{waitingGuests.length}</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Waiting</p>

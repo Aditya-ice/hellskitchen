@@ -5,7 +5,7 @@ import type {
   Order,
   StaffMember,
   Table,
-} from "@/lib/domain";
+} from "./domain.js";
 
 export const restaurant = {
   name: "Ember & Ash",

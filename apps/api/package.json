@@ -1,0 +1,30 @@
+{
+  "name": "@hellskitchen/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build --workspace=@hellskitchen/shared",
+    "dev": "tsx watch src/index.ts",
+    "prebuild": "npm run build --workspace=@hellskitchen/shared",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "pretypecheck": "npm run build --workspace=@hellskitchen/shared",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build --workspace=@hellskitchen/shared",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.62.0",
+    "@hellskitchen/shared": "*",
+    "@hono/node-server": "^1.13.8",
+    "@tavily/core": "^0.7.7",
+    "hono": "^4.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.19.3",
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  }
+}
