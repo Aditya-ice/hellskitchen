@@ -1,0 +1,137 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { Mic, Square, Waves } from "lucide-react";
+import type { RealtimeConnection } from "@elevenlabs/client";
+import { apiFetch } from "@/lib/api-client";
+
+interface VoiceInputProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  rows?: number;
+  disabled?: boolean;
+}
+
+export function VoiceInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  rows = 3,
+  disabled = false,
+}: VoiceInputProps) {
+  const [recording, setRecording] = useState(false);
+  const [status, setStatus] = useState("Type a note or use ElevenLabs voice");
+  const connection = useRef<RealtimeConnection | null>(null);
+  const baseText = useRef("");
+  const connectingRef = useRef(false);
+
+  useEffect(() => () => connection.current?.close(), []);
+
+  async function start() {
+    if (connectingRef.current || recording) return;
+    connectingRef.current = true;
+    setStatus("Connecting to ElevenLabs…");
+    baseText.current = value.trim();
+
+    try {
+      const data = await apiFetch<{ token: string; configured: boolean }>(
+        "/v1/integrations/elevenlabs/token",
+      );
+
+      const { Scribe, RealtimeEvents, CommitStrategy } = await import(
+        "@elevenlabs/client"
+      );
+      const live = Scribe.connect({
+        token: data.token,
+        modelId: "scribe_v2_realtime",
+        commitStrategy: CommitStrategy.VAD,
+        vadSilenceThresholdSecs: 1.1,
+        noVerbatim: true,
+        keyterms: ["Ember", "tartare", "farro", "allergy", "gluten-free"],
+        microphone: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      live.on(RealtimeEvents.OPEN, () => {
+        setRecording(true);
+        connectingRef.current = false;
+        setStatus("Listening — speak naturally");
+      });
+      live.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data) => {
+        const next = [baseText.current, data.text].filter(Boolean).join(" ");
+        onChange(next);
+      });
+      live.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (data) => {
+        baseText.current = [baseText.current, data.text].filter(Boolean).join(" ").trim();
+        onChange(baseText.current);
+      });
+      live.on(RealtimeEvents.ERROR, (data) => {
+        setStatus(data.error || "Voice connection failed. Continue typing.");
+        setRecording(false);
+        connectingRef.current = false;
+      });
+      live.on(RealtimeEvents.CLOSE, () => {
+        setRecording(false);
+        connectingRef.current = false;
+        setStatus("Voice stopped — you can edit the transcript");
+      });
+      connection.current = live;
+    } catch (error) {
+      setRecording(false);
+      connectingRef.current = false;
+      setStatus(
+        error instanceof Error
+          ? `${error.message} Continue typing.`
+          : "Voice unavailable. Continue typing.",
+      );
+    }
+  }
+
+  function stop() {
+    connection.current?.close();
+    connection.current = null;
+    setRecording(false);
+    connectingRef.current = false;
+  }
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <label className="text-xs font-black uppercase tracking-[0.12em] text-ink-muted">
+          {label}
+        </label>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={recording ? stop : start}
+          className={`flex items-center gap-2 rounded-full px-3 py-2 text-xs font-black disabled:opacity-40 ${
+            recording
+              ? "pulse-ring bg-accent text-white"
+              : "border border-line bg-white hover:border-accent hover:text-accent"
+          }`}
+        >
+          {recording ? <Square className="size-3 fill-current" /> : <Mic className="size-3.5" />}
+          {recording ? "Stop" : "Voice"}
+        </button>
+      </div>
+      <textarea
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        rows={rows}
+        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10 disabled:bg-surface-muted disabled:text-ink-muted"
+      />
+      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
+        <Waves className="size-3" />
+        {status}
+      </p>
+    </div>
+  );
+}

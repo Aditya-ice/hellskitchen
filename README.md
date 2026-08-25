@@ -1,57 +1,124 @@
 # Ember POS
 
-Ember POS is a guest-focused, AI-assisted front-of-house prototype. It helps a host move a party from arrival to the right table, then helps a server build a safe and relevant order with explainable recommendations.
+Ember POS is a guest-focused, AI-assisted front-of-house system built with a decoupled architecture (Next.js 16 frontend + standalone Hono/Node.js API backend + shared domain logic).
 
-## What the demo does
+It helps a restaurant host move a party from arrival to the right table, then guides servers toward safe, relevant dishes with explainable recommendations.
 
-- Manages expected guests, check-ins, and walk-ins.
-- Scores tables using party size, accessibility, seating preference, wait time, and server load.
-- Surfaces guest history, dietary needs, allergies, likes, and service notes.
-- Ranks dishes using hard safety constraints, live ingredient availability, preferences, prep time, popularity, and balanced value.
-- Captures guest and order notes by ElevenLabs voice transcription or typed fallback.
-- Uses Tavily for optional, source-linked dish background.
-- Offers a lightweight Stay22 map for guests who need nearby accommodation.
-- Persists state locally and syncs same-browser tabs with `BroadcastChannel`.
+---
 
-The recommendation engine assists staff; it does not replace allergy verification or staff judgment.
+## Architecture Overview
 
-## Setup
+```
+hellskitchen/
+├── apps/
+│   ├── web/               # Next.js 16 frontend (UI, guest concierge, voice capture)
+│   └── api/               # Standalone Hono/Node.js backend (REST API, POS state, sponsor proxy)
+├── packages/
+│   └── shared/            # Shared domain types, demo catalog data, and recommendation engine
+├── package.json           # npm workspaces root
+└── README.md
+```
+
+```
+┌────────────────────────────────┐            ┌────────────────────────────────┐
+│   Next.js 16 Web (Vercel)      │            │   Hono/Node.js API (Render)    │
+│   - POS Shell & Tabs           │            │   - Live POS State Store       │
+│   - Voice Mic Streaming        │            │   - Seating & Order Validation │
+│   - Stay22 Accommodation Map   │            │   - ElevenLabs & Tavily Proxy  │
+└───────────────┬────────────────┘            └───────────────┬────────────────┘
+                │                                             │
+                │        REST / CORS (Bearer Demo Token)      │
+                └─────────────────────────────────────────────┘
+```
+
+---
+
+## Features
+
+- **Arrivals & Seating:** Expected guest list, party sizes, check-in, walk-in creation, and smart table matching based on capacity, accessibility, server balance, and wait times.
+- **Dietary-Aware Ordering:** Hard safety constraints for guest allergens, dietary compatibility filters (vegan, vegetarian, gluten-free), low-stock ingredient alerts, prep pacing, and profit margin balancing.
+- **Guest Profiles & Activity Trail:** Real-time visit history, notes, and chronological activity logging.
+- **ElevenLabs Voice Integration:** Server mints single-use `realtime_scribe` tokens; browser streams microphone input over WebSocket with typed fallback.
+- **Tavily Culinary Context:** Web search for ingredient background and dish seasonality with live citations and allergy disclaimers.
+- **Stay22 Concierge:** Interactive accommodation map for traveling guests centered on the venue.
+
+---
+
+## Local Development
+
+### 1. Install dependencies
 
 ```bash
 npm install
-cp .env.example .env.local
-npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), then choose **Open the live POS**.
+### 2. Configure environment variables
 
-Environment variables:
-
-- `ELEVENLABS_API_KEY`: server-side key used to mint short-lived Scribe tokens.
-- `TAVILY_API_KEY`: server-side search key. The UI uses a seeded fallback without it.
-- `NEXT_PUBLIC_STAY22_AID`: Stay22 affiliate ID used by the accommodation map.
-- `NEXT_PUBLIC_RESTAURANT_VENUE`: address used to center the Stay22 map.
-
-No secret key is sent to the browser. ElevenLabs receives only a short-lived single-use token.
-
-## Quality checks
+Copy `.env.example` into workspace apps:
 
 ```bash
-npm run lint
-npm run typecheck
-npm test
-npm run build
+cp apps/api/.env.example apps/api/.env
+cp apps/web/.env.example apps/web/.env.local
 ```
 
-## Loom demo script
+### 3. Start development servers
 
-1. Open **Arrivals** and select Maya Chen. Point out the tree-nut allergy, gluten-free need, anniversary note, and window/accessibility preferences.
-2. Show the table recommendations. Explain why T2 scores highest, then seat Maya there.
-3. Open **Order**. Show that unsafe or incompatible dishes are blocked, while available dishes are ranked with plain-language reasons.
-4. Add the Golden Beet & Citrus and Cedar Salmon. Mention the live warning that carrots are running low.
-5. Dictate an order note with ElevenLabs, or type it if no API key is configured, then send the order.
-6. Open **Dish context** to show Tavily’s source-linked web context and the allergy disclaimer.
-7. Open **Guest concierge** to show the Stay22 accommodation map.
-8. Return to **Guest** to show saved notes, the current check, and the activity trail.
+Start both API (`http://localhost:4000`) and Web (`http://localhost:3000`):
 
-Use **Reset demo** in the POS header to restore the seeded state before another recording.
+```bash
+npm run dev:api   # In terminal 1 (starts Hono API on port 4000)
+npm run dev:web   # In terminal 2 (starts Next.js web on port 3000)
+```
+
+Open [http://localhost:3000](http://localhost:3000) and click **Open the live POS**.
+
+---
+
+## Quality Checks & Testing
+
+Run all quality checks across the entire monorepo:
+
+```bash
+npm test          # Run Vitest test suite across all workspaces (15 passing tests)
+npm run typecheck # TypeScript strict type verification
+npm run lint      # ESLint code style & Next.js core vitals check
+npm run build     # Production build of shared package, API, and Next.js bundle
+```
+
+---
+
+## Deployment Guide (Free & Student Tiers)
+
+### 1. Backend Deployment (Render Free Web Service or Heroku Eco)
+
+- **Repository Root:** `/`
+- **Root Directory / Build Filter:** `apps/api`
+- **Build Command:** `npm install && npm run build --workspace=@hellskitchen/shared && npm run build --workspace=@hellskitchen/api`
+- **Start Command:** `npm run start --workspace=@hellskitchen/api` (or `node apps/api/dist/index.js`)
+- **Health Check Path:** `/health`
+- **Environment Variables:**
+  - `PORT=4000` (or injected by host)
+  - `FRONTEND_ORIGIN=https://your-frontend-app.vercel.app` (for CORS)
+  - `ELEVENLABS_API_KEY=...` (optional, server secret)
+  - `TAVILY_API_KEY=...` (optional, server secret)
+
+### 2. Frontend Deployment (Vercel Hobby)
+
+- **Repository Root:** Import GitHub repo `Aditya-ice/hellskitchen`
+- **Production Branch:** `main`
+- **Root Directory:** `apps/web`
+- **Framework Preset:** Next.js
+- **Build Command:** `npm run build`
+- **Environment Variables:**
+  - `NEXT_PUBLIC_API_URL=https://your-api-service.onrender.com`
+  - `NEXT_PUBLIC_STAY22_AID=...` (optional affiliate ID)
+  - `NEXT_PUBLIC_RESTAURANT_VENUE="Fordham University, Lincoln Center, New York"`
+
+---
+
+## Polyglot Evolution Roadmap
+
+For high-scale enterprise deployments, specific subsystems can be migrated beyond pure TypeScript:
+- **Rust (Wasm / Native gRPC):** NP-hard floor constraint optimization & offline client solver.
+- **Go / Elixir:** High-concurrency WebSocket & KDS ticket synchronization gateway.
+- **Python (FastAPI + pgvector):** Guest culinary embeddings & predictive table-turn machine learning.
