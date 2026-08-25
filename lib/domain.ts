@@ -1,118 +1,34 @@
-export type DiningArea = "main" | "window" | "patio" | "bar";
-export type TableStatus = "available" | "occupied" | "clearing" | "reserved";
-export type GuestStatus = "expected" | "waiting" | "seated" | "ordered";
-export type OrderStatus = "draft" | "sent";
+/**
+ * Domain types for the POS.
+ *
+ * These are no longer hand-written: they are generated from the Rust structs
+ * in `crates/ember-core/src/domain.rs` by ts-rs (run `cargo test`) and land in
+ * `lib/generated/`. This barrel keeps `@/lib/domain` as the import path so the
+ * UI does not care where they came from, and makes drift between the two
+ * languages impossible.
+ */
 
-export interface Ingredient {
-  id: string;
-  name: string;
-  aliases: string[];
-  onHand: number;
-  par: number;
-  unit: string;
-}
+export type { ActivityEvent } from "@/lib/generated/ActivityEvent";
+export type { DiningArea } from "@/lib/generated/DiningArea";
+export type { GuestProfile } from "@/lib/generated/GuestProfile";
+export type { GuestStatus } from "@/lib/generated/GuestStatus";
+export type { Ingredient } from "@/lib/generated/Ingredient";
+export type { MenuItem } from "@/lib/generated/MenuItem";
+export type { MenuSection } from "@/lib/generated/MenuSection";
+export type { Order } from "@/lib/generated/Order";
+export type { OrderLine } from "@/lib/generated/OrderLine";
+export type { OrderStatus } from "@/lib/generated/OrderStatus";
+export type { PosState } from "@/lib/generated/PosState";
+export type { Recommendation } from "@/lib/generated/Recommendation";
+export type { Restaurant } from "@/lib/generated/Restaurant";
+export type { StaffMember } from "@/lib/generated/StaffMember";
+export type { StaffRole } from "@/lib/generated/StaffRole";
+export type { Table } from "@/lib/generated/Table";
+export type { TableStatus } from "@/lib/generated/TableStatus";
+export type { TavilyContext } from "@/lib/generated/TavilyContext";
+export type { TavilySource } from "@/lib/generated/TavilySource";
 
-export interface MenuItem {
-  id: string;
-  name: string;
-  description: string;
-  section: "starter" | "main" | "side" | "dessert";
-  ingredientIds: string[];
-  tags: string[];
-  allergens: string[];
-  price: number;
-  prepMinutes: number;
-  popularity: number;
-  marginScore: number;
-}
-
-export interface Table {
-  id: string;
-  label: string;
-  capacity: number;
-  area: DiningArea;
-  status: TableStatus;
-  accessible: boolean;
-  serverId: string;
-  seatedGuestId: string | null;
-  seatedAt: string | null;
-  estimatedAvailableMinutes: number;
-}
-
-export interface GuestProfile {
-  id: string;
-  name: string;
-  partySize: number;
-  reservationTime: string | null;
-  arrivalTime: string | null;
-  status: GuestStatus;
-  allergies: string[];
-  dietaryNeeds: string[];
-  likes: string[];
-  dislikes: string[];
-  seatingPreferences: string[];
-  visitCount: number;
-  lastVisit: string | null;
-  notes: string;
-}
-
-export interface StaffMember {
-  id: string;
-  name: string;
-  role: "host" | "server" | "manager";
-  initials: string;
-  section?: DiningArea;
-}
-
-export interface OrderLine {
-  menuItemId: string;
-  quantity: number;
-  notes: string;
-}
-
-export interface Order {
-  id: string;
-  guestId: string;
-  tableId: string | null;
-  status: OrderStatus;
-  lines: OrderLine[];
-  guestNotes: string;
-  createdAt: string;
-}
-
-export interface ActivityEvent {
-  id: string;
-  at: string;
-  action: string;
-  detail: string;
-}
-
-export interface PosState {
-  tables: Table[];
-  guests: GuestProfile[];
-  orders: Order[];
-  activity: ActivityEvent[];
-}
-
-export interface Recommendation {
-  id: string;
-  score: number;
-  eligible: boolean;
-  reasons: string[];
-  warnings: string[];
-}
-
-export type TableRecommendation = Recommendation;
-export type DishRecommendation = Recommendation;
-
-export interface TavilySource {
-  title: string;
-  url: string;
-  content: string;
-}
-
-export interface TavilyContext {
-  answer: string | null;
-  sources: TavilySource[];
-  isFallback: boolean;
-}
+/** A scored table suggestion. */
+export type { Recommendation as TableRecommendation } from "@/lib/generated/Recommendation";
+/** A scored dish suggestion. */
+export type { Recommendation as DishRecommendation } from "@/lib/generated/Recommendation";

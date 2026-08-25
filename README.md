@@ -11,47 +11,84 @@ Ember POS is a guest-focused, AI-assisted front-of-house prototype. It helps a h
 - Captures guest and order notes by ElevenLabs voice transcription or typed fallback.
 - Uses Tavily for optional, source-linked dish background.
 - Offers a lightweight Stay22 map for guests who need nearby accommodation.
-- Persists state locally and syncs same-browser tabs with `BroadcastChannel`.
+- Keeps every open surface on one live floor, and keeps the service across restarts.
 
 The recommendation engine assists staff; it does not replace allergy verification or staff judgment.
 
+## Architecture
+
+The scoring rules and all state live in Rust, not in the browser. Every surface —
+this web app, and the macOS app — is a thin client over the same server, so they
+all see one floor.
+
+```
+crates/ember-core     domain model, decision engine, state reducer (pure)
+crates/ember-store    SQLite: append-only action log + snapshot
+crates/ember-server   axum: REST + SSE + static bundle + sponsor proxies
+app/ components/ lib  Next.js UI — renders and dispatches, decides nothing
+lib/generated/        TypeScript types generated from the Rust structs
+```
+
+The action log is both the audit trail and the history the planned Python
+services will learn from, so it is only ever appended to.
+
+Hard safety rules — allergens, dietary conflicts, unavailable stock — live in
+`ember-core` and gate every recommendation. Nothing downstream may reverse that.
+
 ## Setup
+
+Requires Node 20+ and a Rust toolchain.
 
 ```bash
 npm install
 cp .env.example .env.local
-npm run dev
+```
+
+Run the server and the UI in two terminals:
+
+```bash
+npm run dev:server   # ember-server on :4000
+npm run dev          # next dev on :3000, proxying /api/* to :4000
 ```
 
 Open [http://localhost:3000](http://localhost:3000), then choose **Open the live POS**.
 
-Environment variables:
+To run it the way it ships — one binary serving the built UI and the API:
 
-- `ELEVENLABS_API_KEY`: server-side key used to mint short-lived Scribe tokens.
-- `TAVILY_API_KEY`: server-side search key. The UI uses a seeded fallback without it.
-- `NEXT_PUBLIC_STAY22_AID`: Stay22 affiliate ID used by the accommodation map.
-- `NEXT_PUBLIC_RESTAURANT_VENUE`: address used to center the Stay22 map.
+```bash
+npm start            # builds both, serves on :4000
+```
 
-No secret key is sent to the browser. ElevenLabs receives only a short-lived single-use token.
+Anything else on your network can then open `http://<your-ip>:4000` and share the
+same floor.
+
+Environment variables are documented in `.env.example`. Without
+`ELEVENLABS_API_KEY` the voice input falls back to typing; without
+`TAVILY_API_KEY` dish context returns seeded text. Neither key reaches the
+browser.
 
 ## Quality checks
 
 ```bash
 npm run lint
 npm run typecheck
-npm test
-npm run build
+npm test          # UI client layer
+npm run test:rust # engine, reducer, store, server
 ```
+
+`cargo test` also regenerates `lib/generated/` from the Rust types, so the two
+languages cannot drift.
 
 ## Loom demo script
 
 1. Open **Arrivals** and select Maya Chen. Point out the tree-nut allergy, gluten-free need, anniversary note, and window/accessibility preferences.
 2. Show the table recommendations. Explain why T2 scores highest, then seat Maya there.
-3. Open **Order**. Show that unsafe or incompatible dishes are blocked, while available dishes are ranked with plain-language reasons.
-4. Add the Golden Beet & Citrus and Cedar Salmon. Mention the live warning that carrots are running low.
-5. Dictate an order note with ElevenLabs, or type it if no API key is configured, then send the order.
-6. Open **Dish context** to show Tavily’s source-linked web context and the allergy disclaimer.
-7. Open **Guest concierge** to show the Stay22 accommodation map.
-8. Return to **Guest** to show saved notes, the current check, and the activity trail.
+3. Open a second window side by side and seat a party in one — it appears in the other immediately, with no reload.
+4. Open **Order**. Show that unsafe or incompatible dishes are blocked, while available dishes are ranked with plain-language reasons.
+5. Add the Golden Beet & Citrus and Cedar Salmon. Mention the live warning that carrots are running low.
+6. Dictate an order note with ElevenLabs, or type it if no API key is configured, then send the order.
+7. Open **Dish context** to show Tavily's source-linked web context and the allergy disclaimer.
+8. Open **Guest concierge** to show the Stay22 accommodation map.
+9. Return to **Guest** to show saved notes, the current check, and the activity trail.
 
 Use **Reset demo** in the POS header to restore the seeded state before another recording.

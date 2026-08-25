@@ -24,8 +24,6 @@ import {
   Users,
   UtensilsCrossed,
 } from "lucide-react";
-import { ingredients, menuItems, staff } from "@/data/demo";
-import { orderTotal, recommendDishes, recommendTables } from "@/lib/decision-engine";
 import type { GuestProfile, TableStatus } from "@/lib/domain";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
@@ -76,9 +74,7 @@ export function PosShell() {
     (table) => table.seatedGuestId === selectedGuest?.id,
   );
   const selectedOrder = pos.orders.find((order) => order.guestId === selectedGuest?.id);
-  const tableRecommendations = selectedGuest
-    ? recommendTables(selectedGuest, pos.tables)
-    : [];
+  const tableRecommendations = pos.insight.tables;
   const seatableRecommendations = tableRecommendations.filter(
     (recommendation) =>
       recommendation.eligible &&
@@ -89,7 +85,7 @@ export function PosShell() {
           table.seatedGuestId === null,
       ),
   );
-  const dishRecommendations = selectedGuest ? recommendDishes(selectedGuest) : [];
+  const dishRecommendations = pos.insight.dishes;
 
   const filteredGuests = useMemo(
     () =>
@@ -99,7 +95,7 @@ export function PosShell() {
     [pos.guests, search],
   );
 
-  const visibleMenu = menuItems.filter(
+  const visibleMenu = pos.menuItems.filter(
     (item) => menuSection === "all" || item.section === menuSection,
   );
   const openTables = pos.tables.filter((table) => table.status === "available").length;
@@ -472,7 +468,7 @@ export function PosShell() {
               <div className="card p-5">
                 <p className="eyebrow text-ink-muted">Server sections</p>
                 <div className="mt-4 space-y-3">
-                  {staff.filter((member) => member.role === "server").map((server) => {
+                  {pos.staff.filter((member) => member.role === "server").map((server) => {
                     const count = pos.tables.filter((table) => table.serverId === server.id && table.status === "occupied").length;
                     return (
                       <div key={server.id} className="flex items-center justify-between">
@@ -519,7 +515,7 @@ export function PosShell() {
                     <p className="text-xs font-black">AI picks for this guest</p>
                     <div className="mt-2 space-y-2">
                       {dishRecommendations.filter((item) => item.eligible).slice(0, 3).map((recommendation, index) => {
-                        const item = menuItems.find((menuItem) => menuItem.id === recommendation.id)!;
+                        const item = pos.menuItems.find((menuItem) => menuItem.id === recommendation.id)!;
                         return (
                           <button
                             key={item.id}
@@ -569,7 +565,7 @@ export function PosShell() {
               <div className="grid gap-3 p-4 sm:grid-cols-2">
                 {visibleMenu.map((item) => {
                   const recommendation = dishRecommendations.find((entry) => entry.id === item.id);
-                  const lowIngredients = ingredients.filter(
+                  const lowIngredients = pos.ingredients.filter(
                     (ingredient) =>
                       item.ingredientIds.includes(ingredient.id) &&
                       ingredient.onHand / ingredient.par <= 0.25,
@@ -638,7 +634,7 @@ export function PosShell() {
                 ) : (
                   <div className="space-y-3">
                     {selectedOrder.lines.map((line) => {
-                      const item = menuItems.find((menuItem) => menuItem.id === line.menuItemId)!;
+                      const item = pos.menuItems.find((menuItem) => menuItem.id === line.menuItemId)!;
                       return (
                         <div key={line.menuItemId} className="flex items-start justify-between gap-3">
                           <div>
@@ -687,7 +683,7 @@ export function PosShell() {
               <div className="border-t border-line bg-surface-muted/60 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-bold">Subtotal</span>
-                  <span className="text-xl font-black">${orderTotal(selectedOrder).toFixed(2)}</span>
+                  <span className="text-xl font-black">${pos.insight.orderTotal.toFixed(2)}</span>
                 </div>
                 <button
                   type="button"
@@ -768,12 +764,12 @@ export function PosShell() {
                   </div>
                   <div className="rounded-xl border border-line p-4">
                     <Star className="size-5 text-warning" />
-                    <p className="mt-3 text-sm font-black">{menuItems.find((item) => item.id === dishRecommendations.find((entry) => entry.eligible)?.id)?.name}</p>
+                    <p className="mt-3 text-sm font-black">{pos.menuItems.find((item) => item.id === dishRecommendations.find((entry) => entry.eligible)?.id)?.name}</p>
                     <p className="mt-1 text-xs text-ink-muted">Top dish match</p>
                   </div>
                   <div className="rounded-xl border border-line p-4">
                     <CircleDollarSign className="size-5 text-accent" />
-                    <p className="mt-3 text-sm font-black">${orderTotal(selectedOrder).toFixed(2)}</p>
+                    <p className="mt-3 text-sm font-black">${pos.insight.orderTotal.toFixed(2)}</p>
                     <p className="mt-1 text-xs text-ink-muted">Current subtotal</p>
                   </div>
                 </div>

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Waves } from "lucide-react";
 import type { RealtimeConnection } from "@elevenlabs/client";
-import { ensureDemoSession } from "@/lib/demo-session-client";
+import { apiUrl, ensureDemoSession } from "@/lib/pos-client";
 
 interface VoiceInputProps {
   label: string;
@@ -40,7 +40,10 @@ export function VoiceInput({
 
     try {
       await ensureDemoSession();
-      const response = await fetch("/api/elevenlabs/token", { cache: "no-store" });
+      const response = await fetch(apiUrl("/api/elevenlabs/token"), {
+        cache: "no-store",
+        credentials: "include",
+      });
       const body = (await response.json()) as { token?: string; error?: string };
       if (!response.ok || !body.token) throw new Error(body.error ?? "Voice unavailable");
 

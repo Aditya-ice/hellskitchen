@@ -153,7 +153,9 @@ pub struct StaffMember {
     pub name: String,
     pub role: StaffRole,
     pub initials: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Always serialised, even when absent: ts-rs generates this as a required
+    // nullable field, and skipping it would put the wire format at odds with
+    // the type generated from it.
     pub section: Option<DiningArea>,
 }
 

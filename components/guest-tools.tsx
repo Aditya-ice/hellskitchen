@@ -9,35 +9,39 @@ import {
   MapPin,
   X,
 } from "lucide-react";
-import {
-  fallbackDishContext,
-  menuItems,
-  restaurant,
-} from "@/data/demo";
 import type { TavilyContext } from "@/lib/domain";
-import { ensureDemoSession } from "@/lib/demo-session-client";
+import { apiUrl, ensureDemoSession } from "@/lib/pos-client";
+import { usePos } from "@/components/pos-provider";
+
+/** Shown when Tavily is unavailable; the kitchen is the source of truth. */
+const FALLBACK_DISH_CONTEXT =
+  "Seasonal preparation details are unavailable. Confirm ingredients and substitutions with the kitchen before describing them to a guest.";
 
 type Tool = "dish" | "travel" | null;
 
 export function GuestTools() {
+  const { menuItems, restaurant } = usePos();
   const [tool, setTool] = useState<Tool>(null);
-  const [dishId, setDishId] = useState(menuItems[0].id);
+  const [dishId, setDishId] = useState<string>("");
   const [context, setContext] = useState<TavilyContext | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const aid = process.env.NEXT_PUBLIC_STAY22_AID ?? "";
+  // The menu arrives from the server, so default to the first dish once it does.
+  const activeDishId = dishId || menuItems[0]?.id || "";
   const venue = process.env.NEXT_PUBLIC_RESTAURANT_VENUE ?? restaurant.venue;
   const mapUrl = `https://www.stay22.com/embed/gm?aid=${encodeURIComponent(aid)}&address=${encodeURIComponent(venue)}&venue=${encodeURIComponent(restaurant.name)}`;
 
   async function researchDish() {
-    const dish = menuItems.find((item) => item.id === dishId);
+    const dish = menuItems.find((item) => item.id === activeDishId);
     if (!dish) return;
     setLoading(true);
     setContext(null);
     setError(null);
     try {
       await ensureDemoSession();
-      const response = await fetch("/api/tavily/search", {
+      const response = await fetch(apiUrl("/api/tavily/search"), {
+        credentials: "include",
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dishId: dish.id }),
@@ -63,7 +67,7 @@ export function GuestTools() {
           : "Dish context is temporarily unavailable.",
       );
       setContext({
-        answer: fallbackDishContext,
+        answer: FALLBACK_DISH_CONTEXT,
         sources: [],
         isFallback: true,
       });
@@ -125,8 +129,9 @@ export function GuestTools() {
                 </p>
                 <div className="mt-5 flex gap-2">
                   <select
-                    value={dishId}
+                    value={activeDishId}
                     onChange={(event) => setDishId(event.target.value)}
+                    disabled={!menuItems.length}
                     className="min-w-0 flex-1 rounded-xl border border-line bg-white px-3 py-3 text-sm font-bold"
                   >
                     {menuItems.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
