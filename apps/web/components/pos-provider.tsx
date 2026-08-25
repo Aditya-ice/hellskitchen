@@ -50,11 +50,21 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [tableRecommendations, setTableRecommendations] = useState<Recommendation[]>([]);
   const [dishRecommendations, setDishRecommendations] = useState<Recommendation[]>([]);
   const pollingRef = useRef<number | null>(null);
+  const lastAppliedVersion = useRef(0);
+  const pendingMutations = useRef(0);
+
+  const applyServerState = useCallback((incoming: PosState) => {
+    if (incoming.version < lastAppliedVersion.current) return;
+    lastAppliedVersion.current = incoming.version;
+    setState(incoming);
+  }, []);
 
   const fetchLiveState = useCallback(async () => {
+    if (pendingMutations.current > 0) return;
+
     try {
       const data = await apiFetch<PosState>("/v1/state");
-      setState(data);
+      applyServerState(data);
       setServerConnected(true);
       setServerError(null);
     } catch (err) {
@@ -65,7 +75,26 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setHydrated(true);
     }
-  }, []);
+  }, [applyServerState]);
+
+  const runMutation = useCallback(
+    async <Result,>(
+      request: () => Promise<Result>,
+      stateFromResult: (result: Result) => PosState,
+    ) => {
+      pendingMutations.current += 1;
+      try {
+        const result = await request();
+        applyServerState(stateFromResult(result));
+        setServerConnected(true);
+        setServerError(null);
+        return result;
+      } finally {
+        pendingMutations.current -= 1;
+      }
+    },
+    [applyServerState],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -74,7 +103,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       try {
         const data = await apiFetch<PosState>("/v1/state");
         if (mounted) {
-          setState(data);
+          applyServerState(data);
           setServerConnected(true);
           setServerError(null);
         }
@@ -102,7 +131,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       mounted = false;
       if (pollingRef.current) window.clearInterval(pollingRef.current);
     };
-  }, [fetchLiveState]);
+  }, [applyServerState, fetchLiveState]);
 
   const effectiveSelectedGuestId = state.guests.some(
     (guest) => guest.id === selectedGuestId,
@@ -140,28 +169,34 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     async (guestId: string) => {
       setSelectedGuestId(guestId);
       try {
-        const updated = await apiFetch<PosState>(`/v1/guests/${guestId}/check-in`, {
-          method: "POST",
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/guests/${guestId}/check-in`, {
+              method: "POST",
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to check in guest.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const addWalkIn = useCallback(
     async (name: string, partySize: number) => {
       try {
-        const res = await apiFetch<{ guest: { id: string }; state: PosState }>(
-          "/v1/guests/walk-ins",
-          {
-            method: "POST",
-            body: JSON.stringify({ name, partySize }),
-          },
+        const res = await runMutation(
+          () =>
+            apiFetch<{ guest: { id: string }; state: PosState }>(
+              "/v1/guests/walk-ins",
+              {
+                method: "POST",
+                body: JSON.stringify({ name, partySize }),
+              },
+            ),
+          (result) => result.state,
         );
-        setState(res.state);
         setSelectedGuestId(res.guest.id);
         return res.guest.id;
       } catch (err) {
@@ -169,111 +204,132 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         return "";
       }
     },
-    [],
+    [runMutation],
   );
 
   const updateGuestNotes = useCallback(
     async (guestId: string, notes: string) => {
       try {
-        const updated = await apiFetch<PosState>(`/v1/guests/${guestId}/notes`, {
-          method: "PATCH",
-          body: JSON.stringify({ notes }),
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/guests/${guestId}/notes`, {
+              method: "PATCH",
+              body: JSON.stringify({ notes }),
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to update notes.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const seatGuest = useCallback(
     async (guestId: string, tableId: string) => {
       try {
-        const updated = await apiFetch<PosState>(`/v1/guests/${guestId}/seat`, {
-          method: "POST",
-          body: JSON.stringify({ tableId }),
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/guests/${guestId}/seat`, {
+              method: "POST",
+              body: JSON.stringify({ tableId }),
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to seat guest.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const addOrderItem = useCallback(
     async (guestId: string, menuItemId: string) => {
       try {
-        const updated = await apiFetch<PosState>(`/v1/orders/${guestId}/items`, {
-          method: "POST",
-          body: JSON.stringify({ menuItemId }),
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/orders/${guestId}/items`, {
+              method: "POST",
+              body: JSON.stringify({ menuItemId }),
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to add item.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const removeOrderItem = useCallback(
     async (guestId: string, menuItemId: string) => {
       try {
-        const updated = await apiFetch<PosState>(
-          `/v1/orders/${guestId}/items/${menuItemId}`,
-          {
-            method: "DELETE",
-          },
+        await runMutation(
+          () =>
+            apiFetch<PosState>(
+              `/v1/orders/${guestId}/items/${menuItemId}`,
+              {
+                method: "DELETE",
+              },
+            ),
+          (updated) => updated,
         );
-        setState(updated);
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to remove item.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const updateOrderNotes = useCallback(
     async (guestId: string, notes: string) => {
       try {
-        const updated = await apiFetch<PosState>(`/v1/orders/${guestId}/notes`, {
-          method: "PATCH",
-          body: JSON.stringify({ notes }),
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/orders/${guestId}/notes`, {
+              method: "PATCH",
+              body: JSON.stringify({ notes }),
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to update notes.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const sendOrder = useCallback(
     async (guestId: string) => {
       try {
-        const updated = await apiFetch<PosState>(`/v1/orders/${guestId}/send`, {
-          method: "POST",
-        });
-        setState(updated);
+        await runMutation(
+          () =>
+            apiFetch<PosState>(`/v1/orders/${guestId}/send`, {
+              method: "POST",
+            }),
+          (updated) => updated,
+        );
       } catch (err) {
         setServerError(err instanceof Error ? err.message : "Failed to send order.");
       }
     },
-    [],
+    [runMutation],
   );
 
   const resetDemo = useCallback(async () => {
     setSelectedGuestId(demoGuests[0]?.id ?? null);
     try {
-      const updated = await apiFetch<PosState>("/v1/demo/reset", {
-        method: "POST",
-      });
-      setState(updated);
+      await runMutation(
+        () =>
+          apiFetch<PosState>("/v1/demo/reset", {
+            method: "POST",
+          }),
+        (updated) => updated,
+      );
     } catch (err) {
       setServerError(err instanceof Error ? err.message : "Failed to reset demo.");
     }
-  }, []);
+  }, [runMutation]);
 
   const value = useMemo<PosContextValue>(
     () => ({

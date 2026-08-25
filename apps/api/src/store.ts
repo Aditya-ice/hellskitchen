@@ -7,7 +7,8 @@ import {
 } from "@hellskitchen/shared";
 
 class StateStore {
-  private state: PosState = createInitialPosState();
+  // Start from wall-clock time so revisions remain newer across process restarts.
+  private state: PosState = createInitialPosState(Date.now());
 
   getState(): PosState {
     return this.state;
@@ -25,7 +26,7 @@ class StateStore {
   }
 
   reset(): PosState {
-    this.state = createInitialPosState();
+    this.state = createInitialPosState(this.state.version + 1);
     return this.state;
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { demoGuests, demoOrders, demoTables } from "./demo";
+import { demoGuests, demoOrders, demoTables } from "./demo.js";
 import {
   canSeatGuestAtTable,
   createInitialPosState,
@@ -8,8 +8,8 @@ import {
   recommendDishes,
   recommendTables,
   reducePosState,
-} from "./decision-engine";
-import type { SharedAction, SharedActionInput } from "./domain";
+} from "./decision-engine.js";
+import type { SharedAction, SharedActionInput } from "./domain.js";
 
 const action = (value: SharedActionInput): SharedAction =>
   ({
@@ -94,6 +94,24 @@ describe("orders & totals", () => {
 });
 
 describe("POS state transitions", () => {
+  it("increments state versions only for accepted transitions", () => {
+    const initial = createInitialPosState();
+    const checkedIn = reducePosState(
+      initial,
+      action({ type: "check-in", guestId: "guest-jordan" }),
+    );
+    const rejected = reducePosState(
+      checkedIn,
+      action({ type: "check-in", guestId: "guest-jordan" }),
+    );
+    const reset = reducePosState(checkedIn, action({ type: "reset" }));
+
+    expect(initial.version).toBe(0);
+    expect(checkedIn.version).toBe(1);
+    expect(rejected).toBe(checkedIn);
+    expect(reset.version).toBe(2);
+  });
+
   it("rejects invalid seating and accepts a compatible waiting guest", () => {
     const initial = createInitialPosState();
     const expectedGuest = reducePosState(

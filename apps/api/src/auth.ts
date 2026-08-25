@@ -1,5 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
-import type { Env } from "./app";
+import type { Env } from "./app.js";
 
 const SESSION_PATTERN = /^[0-9a-f-]{36}$/i;
 const validTokens = new Set<string>();

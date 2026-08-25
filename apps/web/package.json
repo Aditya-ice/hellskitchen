@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "npm run build --workspace=@hellskitchen/shared",
     "dev": "next dev",
+    "prebuild": "npm run build --workspace=@hellskitchen/shared",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "pretypecheck": "npm run build --workspace=@hellskitchen/shared",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

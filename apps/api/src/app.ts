@@ -16,8 +16,8 @@ import {
   getClientIp,
   issueSessionToken,
   requireAuth,
-} from "./auth";
-import { store } from "./store";
+} from "./auth.js";
+import { store } from "./store.js";
 
 export type Env = {
   Variables: {

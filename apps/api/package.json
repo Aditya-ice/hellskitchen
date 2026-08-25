@@ -4,10 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run build --workspace=@hellskitchen/shared",
     "dev": "tsx watch src/index.ts",
+    "prebuild": "npm run build --workspace=@hellskitchen/shared",
     "build": "tsc",
     "start": "node dist/index.js",
+    "pretypecheck": "npm run build --workspace=@hellskitchen/shared",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build --workspace=@hellskitchen/shared",
     "test": "vitest run"
   },
   "dependencies": {

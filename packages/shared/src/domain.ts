@@ -88,6 +88,7 @@ export interface ActivityEvent {
 }
 
 export interface PosState {
+  version: number;
   tables: Table[];
   guests: GuestProfile[];
   orders: Order[];

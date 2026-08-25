@@ -1,4 +1,4 @@
-import { ingredients, menuItems } from "./demo";
+import { ingredients, menuItems } from "./demo.js";
 import type {
   ActivityEvent,
   DishRecommendation,
@@ -8,8 +8,8 @@ import type {
   SharedAction,
   Table,
   TableRecommendation,
-} from "./domain";
-import { demoGuests, demoOrders, demoTables } from "./demo";
+} from "./domain.js";
+import { demoGuests, demoOrders, demoTables } from "./demo.js";
 
 const clampScore = (score: number) => Math.max(0, Math.min(100, Math.round(score)));
 const normalize = (value: string) => value.trim().toLowerCase();
@@ -177,8 +177,9 @@ export function estimateWait(guest: GuestProfile, tables: Table[]) {
   return table?.status === "available" ? 0 : table?.estimatedAvailableMinutes ?? 15;
 }
 
-export function createInitialPosState(): PosState {
+export function createInitialPosState(version = 0): PosState {
   return {
+    version,
     tables: demoTables.map((table) => ({ ...table })),
     guests: demoGuests.map((guest) => ({
       ...guest,
@@ -212,6 +213,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
       if (!guest || guest.status !== "expected") return current;
       return {
         ...current,
+        version: current.version + 1,
         guests: current.guests.map((item) =>
           item.id === action.guestId
             ? {
@@ -234,6 +236,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
       if (current.guests.some((guest) => guest.id === action.guest.id)) return current;
       return {
         ...current,
+        version: current.version + 1,
         guests: [...current.guests, action.guest],
         activity: [
           activity(
@@ -247,6 +250,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
     case "update-guest-notes":
       return {
         ...current,
+        version: current.version + 1,
         guests: current.guests.map((guest) =>
           guest.id === action.guestId ? { ...guest, notes: action.notes } : guest,
         ),
@@ -271,6 +275,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
       );
       return {
         ...current,
+        version: current.version + 1,
         tables: current.tables.map((table) => {
           if (table.id === currentTable?.id) {
             return {
@@ -324,6 +329,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
     case "add-order-item":
       return {
         ...current,
+        version: current.version + 1,
         orders: current.orders.map((order) =>
           order.guestId !== action.guestId || order.status === "sent"
             ? order
@@ -347,6 +353,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
     case "remove-order-item":
       return {
         ...current,
+        version: current.version + 1,
         orders: current.orders.map((order) =>
           order.guestId !== action.guestId || order.status === "sent"
             ? order
@@ -365,6 +372,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
     case "update-order-notes":
       return {
         ...current,
+        version: current.version + 1,
         orders: current.orders.map((order) =>
           order.guestId === action.guestId && order.status === "draft"
             ? { ...order, guestNotes: action.notes }
@@ -379,6 +387,7 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
       }
       return {
         ...current,
+        version: current.version + 1,
         orders: current.orders.map((item) =>
           item.id === order.id ? { ...item, status: "sent" } : item,
         ),
@@ -392,6 +401,6 @@ export function reducePosState(current: PosState, action: SharedAction): PosStat
       };
     }
     case "reset":
-      return createInitialPosState();
+      return createInitialPosState(current.version + 1);
   }
 }

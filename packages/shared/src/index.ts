@@ -1,3 +1,3 @@
-export * from "./domain";
-export * from "./demo";
-export * from "./decision-engine";
+export * from "./domain.js";
+export * from "./demo.js";
+export * from "./decision-engine.js";

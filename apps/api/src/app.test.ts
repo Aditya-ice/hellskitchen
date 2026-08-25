@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createServerApp } from "./app";
-import { store } from "./store";
+import { createServerApp } from "./app.js";
+import { store } from "./store.js";
 
 describe("API server routes & auth", () => {
   let app: ReturnType<typeof createServerApp>;
@@ -56,6 +56,7 @@ describe("API server routes & auth", () => {
     expect(stateRes.status).toBe(200);
     const state = await stateRes.json();
     expect(state.guests.length).toBeGreaterThan(0);
+    const initialVersion = state.version;
 
     // Check-in guest
     const checkInRes = await app.request("/v1/guests/guest-jordan/check-in", {
@@ -65,6 +66,7 @@ describe("API server routes & auth", () => {
     expect(checkInRes.status).toBe(200);
     const afterCheckIn = await checkInRes.json();
     expect(afterCheckIn.guests.find((g: { id: string }) => g.id === "guest-jordan").status).toBe("waiting");
+    expect(afterCheckIn.version).toBe(initialVersion + 1);
 
     // Recommendations
     const recsRes = await app.request("/v1/guests/guest-maya/recommendations", { headers });
@@ -82,6 +84,7 @@ describe("API server routes & auth", () => {
     expect(seatRes.status).toBe(200);
     const afterSeat = await seatRes.json();
     expect(afterSeat.tables.find((t: { id: string }) => t.id === "t2").seatedGuestId).toBe("guest-maya");
+    expect(afterSeat.version).toBe(initialVersion + 2);
 
     // Add order item
     const addItemRes = await app.request("/v1/orders/guest-maya/items", {
@@ -99,6 +102,7 @@ describe("API server routes & auth", () => {
     expect(sendOrderRes.status).toBe(200);
     const afterSend = await sendOrderRes.json();
     expect(afterSend.orders.find((o: { guestId: string }) => o.guestId === "guest-maya").status).toBe("sent");
+    expect(afterSend.version).toBe(initialVersion + 4);
 
     // Reset
     const resetRes = await app.request("/v1/demo/reset", {
@@ -106,5 +110,7 @@ describe("API server routes & auth", () => {
       headers,
     });
     expect(resetRes.status).toBe(200);
+    const afterReset = await resetRes.json();
+    expect(afterReset.version).toBe(initialVersion + 5);
   });
 });
