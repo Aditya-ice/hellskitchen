@@ -1,0 +1,5 @@
+# ts-rs writes the generated TypeScript definitions straight into the web app,
+# so `lib/generated/` is always derived from the Rust types rather than
+# hand-maintained alongside them. Regenerate with `cargo test`.
+[env]
+TS_RS_EXPORT_DIR = { value = "lib/generated", relative = true }

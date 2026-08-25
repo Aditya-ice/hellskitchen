@@ -20,6 +20,13 @@
 # production
 /build
 
+# rust
+/target
+
+# lib/generated is committed on purpose: it is produced from the Rust types by
+# ts-rs (`cargo test`), but keeping it in the tree means `npm run typecheck` and
+# the web build do not require a Rust toolchain.
+
 # misc
 .DS_Store
 *.pem
