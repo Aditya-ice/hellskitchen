@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ember-core"]
+members = ["crates/ember-core", "crates/ember-store", "crates/ember-server"]
 
 [workspace.package]
 version = "0.1.0"
