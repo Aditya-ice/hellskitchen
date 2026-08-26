@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ember-core", "crates/ember-store", "crates/ember-server"]
+members = ["crates/ember-core", "crates/ember-store", "crates/ember-server", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 ember-core = { path = "crates/ember-core" }
 ember-store = { path = "crates/ember-store" }
+ember-server = { path = "crates/ember-server" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tower = "0.5"

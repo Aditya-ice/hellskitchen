@@ -5,8 +5,10 @@
   "scripts": {
     "dev": "next dev",
     "dev:server": "cargo run -q -p ember-server",
+    "desktop": "cargo run -q -p ember-desktop",
     "build": "EMBER_EXPORT=1 next build",
     "build:server": "cargo build --release -p ember-server",
+    "desktop:build": "npm run build && tauri build",
     "start": "npm run build && npm run build:server && EMBER_STATIC_DIR=./out ./target/release/ember-server",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
@@ -23,6 +25,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Accessibility,
   Armchair,
@@ -16,6 +16,7 @@ import {
   Plus,
   ReceiptText,
   RotateCcw,
+  WifiOff,
   Search,
   ShieldAlert,
   Sparkles,
@@ -28,6 +29,7 @@ import type { GuestProfile, TableStatus } from "@/lib/domain";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
 import { GuestTools } from "@/components/guest-tools";
+import { onDesktopTabChange } from "@/lib/desktop";
 
 type Tab = "arrivals" | "floor" | "order" | "guest";
 
@@ -101,6 +103,17 @@ export function PosShell() {
   const openTables = pos.tables.filter((table) => table.status === "available").length;
   const waitingGuests = pos.guests.filter((guest) => guest.status === "waiting");
 
+  // The macOS app's View menu drives the same tabs from the keyboard.
+  useEffect(
+    () =>
+      onDesktopTabChange((tab) => {
+        if (tabs.some((candidate) => candidate.id === tab)) {
+          setActiveTab(tab as Tab);
+        }
+      }),
+    [],
+  );
+
   function chooseGuest(id: string, tab?: Tab) {
     pos.selectGuest(id);
     if (tab) setActiveTab(tab);
@@ -148,6 +161,14 @@ export function PosShell() {
               <p className="text-xl font-black">12m</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Avg wait</p>
             </div>
+            {pos.connected ? null : (
+              <span
+                className="flex items-center gap-1.5 rounded-full bg-warning/12 px-3 py-2 text-xs font-black text-[#8a5b06]"
+                title="Reconnecting to the service. The floor may have moved since this was last updated."
+              >
+                <WifiOff className="size-3.5" /> Offline
+              </span>
+            )}
             <GuestTools />
             <button
               type="button"

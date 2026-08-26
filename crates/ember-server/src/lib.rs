@@ -65,6 +65,20 @@ impl AppState {
     pub fn subscribe(&self) -> broadcast::Receiver<Revision> {
         self.updates.subscribe()
     }
+
+    /// Applies an action and, if it changed anything, tells every subscriber.
+    ///
+    /// The one way state changes. The HTTP handler and the desktop menu both go
+    /// through here, so a reset from the native menu is logged, versioned and
+    /// broadcast exactly like one from a browser.
+    pub fn apply(&self, action: &Action) -> Result<Applied, ember_store::StoreError> {
+        let applied = self.store.apply(action)?;
+        if let Applied::Changed(revision) = &applied {
+            // An error here only means nobody is listening yet.
+            let _ = self.updates.send(revision.clone());
+        }
+        Ok(applied)
+    }
 }
 
 type Shared = Arc<AppState>;
@@ -149,14 +163,10 @@ async fn actions(
     State(state): State<Shared>,
     Json(action): Json<Action>,
 ) -> ApiResult<Json<ActionOutcome>> {
-    let applied = state.store.apply(&action)?;
+    let applied = state.apply(&action)?;
 
     let (outcome, revision) = match applied {
-        Applied::Changed(revision) => {
-            // A send error only means nobody is listening yet.
-            let _ = state.updates.send(revision.clone());
-            ("changed", revision)
-        }
+        Applied::Changed(revision) => ("changed", revision),
         Applied::Rejected => ("rejected", state.store.revision()?),
         Applied::Duplicate => ("duplicate", state.store.revision()?),
     };
@@ -368,5 +378,14 @@ pub async fn serve(state: Shared) -> std::io::Result<()> {
         tokio::net::TcpListener::bind((state.config.host.clone(), state.config.port)).await?;
     let address = listener.local_addr()?;
     println!("Ember POS server listening on http://{address}");
+    serve_on(listener, state).await
+}
+
+/// Serves on an already-bound listener.
+///
+/// The desktop app binds port 0 to get a free port, needs to know which port it
+/// got before the window can be pointed at it, and must not race another
+/// process for it in between — so it binds first and hands the listener over.
+pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::io::Result<()> {
     axum::serve(listener, router(state)).await
 }

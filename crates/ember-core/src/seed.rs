@@ -382,6 +382,7 @@ pub fn orders() -> Vec<Order> {
         lines: vec![],
         guest_notes: String::new(),
         created_at: "2026-08-09T21:39:00.000Z".into(),
+        sent_at: None,
     }]
 }
 

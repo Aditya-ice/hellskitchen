@@ -2,4 +2,10 @@
 import type { OrderLine } from "./OrderLine";
 import type { OrderStatus } from "./OrderStatus";
 
-export type Order = { id: string, guestId: string, tableId: string | null, status: OrderStatus, lines: Array<OrderLine>, guestNotes: string, createdAt: string, };
+export type Order = { id: string, guestId: string, tableId: string | null, status: OrderStatus, lines: Array<OrderLine>, guestNotes: string, createdAt: string, 
+/**
+ * When the order was fired to the kitchen. Ticket age — the number the
+ * pass actually cares about — is measured from here, not from
+ * `created_at`, which is when the party sat down.
+ */
+sentAt: string | null, };

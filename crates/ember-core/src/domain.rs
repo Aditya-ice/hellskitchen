@@ -179,6 +179,10 @@ pub struct Order {
     pub lines: Vec<OrderLine>,
     pub guest_notes: String,
     pub created_at: String,
+    /// When the order was fired to the kitchen. Ticket age — the number the
+    /// pass actually cares about — is measured from here, not from
+    /// `created_at`, which is when the party sat down.
+    pub sent_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -25,9 +25,14 @@ all see one floor.
 crates/ember-core     domain model, decision engine, state reducer (pure)
 crates/ember-store    SQLite: append-only action log + snapshot
 crates/ember-server   axum: REST + SSE + static bundle + sponsor proxies
+src-tauri/            macOS app: embeds the server, adds the native surfaces
 app/ components/ lib  Next.js UI — renders and dispatches, decides nothing
 lib/generated/        TypeScript types generated from the Rust structs
 ```
+
+The macOS app is not a second implementation. It embeds `ember-server`
+in-process and points a webview at it, so the desktop and a browser tab run
+identical code against one floor.
 
 The action log is both the audit trail and the history the planned Python
 services will learn from, so it is only ever appended to.
@@ -61,6 +66,32 @@ npm start            # builds both, serves on :4000
 
 Anything else on your network can then open `http://<your-ip>:4000` and share the
 same floor.
+
+## macOS app
+
+```bash
+npm run desktop        # run it from source
+npm run desktop:build  # build target/release/bundle/macos/Ember POS.app
+```
+
+The app carries its own copy of the UI and its own server, so it needs nothing
+else running. Its service lives in
+`~/Library/Application Support/com.emberpos.desktop/ember.db` and survives
+reinstalling the app.
+
+What the native shell adds over a browser tab:
+
+- **Menu bar** — live ticket count and the age of the oldest ticket.
+- **Kitchen Display** (⌘K) — a ticket rail for a second screen above the pass.
+  Tickets turn amber at 10 minutes and red at 20.
+- **Notifications** — when an order is fired, and when a party with recorded
+  allergies is seated.
+- **⌘1–⌘4** to move between Arrivals, Floor, Order and Guest; **⌘R** to reset
+  the demo service.
+
+`bundle.targets` is `["app"]`. Adding `"dmg"` also works, but `bundle_dmg.sh`
+drives Finder through AppleScript and needs Automation permission granted to
+whichever terminal runs the build.
 
 Environment variables are documented in `.env.example`. Without
 `ELEVENLABS_API_KEY` the voice input falls back to typing; without

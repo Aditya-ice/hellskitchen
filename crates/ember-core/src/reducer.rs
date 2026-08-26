@@ -219,6 +219,7 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
                     lines: vec![],
                     guest_notes: String::new(),
                     created_at: action.at.clone(),
+                    sent_at: None,
                 }),
             }
 
@@ -292,6 +293,7 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
                 return None;
             }
             order.status = OrderStatus::Sent;
+            order.sent_at = Some(action.at.clone());
 
             for guest in next.guests.iter_mut().filter(|item| item.id == *guest_id) {
                 guest.status = GuestStatus::Ordered;
@@ -397,9 +399,12 @@ mod tests {
         )
         .expect("order sent");
 
+        let order = sent.order_for_guest("guest-maya").unwrap();
+        assert_eq!(order.status, OrderStatus::Sent);
         assert_eq!(
-            sent.order_for_guest("guest-maya").unwrap().status,
-            OrderStatus::Sent
+            order.sent_at.as_deref(),
+            Some("2026-08-13T10:00:00.000Z"),
+            "ticket age is measured from when the order was fired"
         );
 
         for rejected in [
