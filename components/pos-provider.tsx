@@ -25,10 +25,12 @@ import {
   ensureDemoSession,
   fetchMenu,
   fetchRecommendations,
+  fetchSummary,
   newAction,
   newWalkIn,
   postAction,
   subscribeToState,
+  type FloorSummary,
   type MenuPayload,
   type Revision,
 } from "@/lib/pos-client";
@@ -59,6 +61,13 @@ const emptyInsight: GuestInsight = {
   dishes: [],
   estimateWait: 0,
   orderTotal: 0,
+};
+
+const emptySummary: FloorSummary = {
+  version: -1,
+  waitingGuests: 0,
+  openTables: 0,
+  averageWaitMinutes: 0,
 };
 
 const emptyMenu: MenuPayload = {
@@ -94,6 +103,8 @@ interface PosContextValue {
 
   /** Server-computed scores for the selected guest. */
   insight: GuestInsight;
+  /** Server-computed floor numbers for the header. */
+  summary: FloorSummary;
 
   selectedGuestId: string | null;
   selectGuest: (id: string) => void;
@@ -108,6 +119,8 @@ interface PosContextValue {
   /** Bumped from the pass. Addressed by order id — the kitchen works from
    *  tickets, not from who is sitting where. */
   completeOrder: (orderId: string) => void;
+  /** Books a delivery in. Additive, so concurrent restocks add up. */
+  restockIngredient: (ingredientId: string, quantity: number) => void;
   resetDemo: () => void;
 }
 
@@ -122,6 +135,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [revision, setRevision] = useState<Revision>(emptyRevision);
   const [menu, setMenu] = useState<MenuPayload>(emptyMenu);
   const [insight, setInsight] = useState<GuestInsight>(emptyInsight);
+  const [summary, setSummary] = useState<FloorSummary>(emptySummary);
   const [selectedGuestId, setSelectedGuestId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -193,6 +207,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       });
     return () => controller.abort();
   }, [effectiveSelectedGuestId, revision.version]);
+
+  // Floor numbers follow the floor, not the selection.
+  useEffect(() => {
+    if (revision.version < 0) return;
+    const controller = new AbortController();
+    fetchSummary(controller.signal)
+      .then(setSummary)
+      .catch(() => {
+        // Header numbers are not worth surfacing an error over; the next
+        // revision retries.
+      });
+    return () => controller.abort();
+  }, [revision.version]);
 
   // Scores are only shown against the guest they were computed for. While a
   // newly selected guest is being scored the panel is empty rather than
@@ -292,6 +319,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     [dispatch],
   );
 
+  const restockIngredient = useCallback(
+    (ingredientId: string, quantity: number) =>
+      dispatch(newAction({ type: "restock-ingredient", ingredientId, quantity })),
+    [dispatch],
+  );
+
   const resetDemo = useCallback(() => {
     setSelectedGuestId(null);
     dispatch(newAction({ type: "reset" }));
@@ -319,6 +352,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       staff: menu.staff,
       ingredients: state.ingredients,
       insight: activeInsight,
+      summary,
       selectedGuestId: effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,
@@ -330,6 +364,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       updateOrderNotes,
       sendOrder,
       completeOrder,
+      restockIngredient,
       resetDemo,
     }),
     [
@@ -339,6 +374,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       error,
       menu,
       activeInsight,
+      summary,
       effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,
@@ -350,6 +386,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       updateOrderNotes,
       sendOrder,
       completeOrder,
+      restockIngredient,
       resetDemo,
     ],
   );

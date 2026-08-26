@@ -7,6 +7,16 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Renders a float the way a JS template literal would, so "8" rather than "8".
+/// Used anywhere a quantity reaches a human-readable string.
+pub fn format_amount(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]

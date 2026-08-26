@@ -74,6 +74,12 @@ pub enum ActionKind {
     CompleteOrder {
         order_id: String,
     },
+    /// A delivery arrived. Additive rather than "set to N", so two people
+    /// booking in stock at once add up instead of overwriting each other.
+    RestockIngredient {
+        ingredient_id: String,
+        quantity: f64,
+    },
     Reset,
 }
 
@@ -90,6 +96,7 @@ impl ActionKind {
             ActionKind::UpdateOrderNotes { .. } => "update-order-notes",
             ActionKind::SendOrder { .. } => "send-order",
             ActionKind::CompleteOrder { .. } => "complete-order",
+            ActionKind::RestockIngredient { .. } => "restock-ingredient",
             ActionKind::Reset => "reset",
         }
     }
@@ -394,6 +401,35 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
                     format!("{guest_name} · {table_label} away from the pass"),
                 ),
             );
+        }
+
+        ActionKind::RestockIngredient {
+            ingredient_id,
+            quantity,
+        } => {
+            // A quantity that is not a positive, finite number is a bug or a
+            // malformed request, never a real delivery. Reject rather than let
+            // it corrupt the larder — NaN in particular would poison every
+            // later comparison and quietly make the dish unsellable forever.
+            if !quantity.is_finite() || *quantity <= 0.0 {
+                return None;
+            }
+
+            let ingredient = next
+                .ingredients
+                .iter_mut()
+                .find(|item| item.id == *ingredient_id)?;
+            ingredient.on_hand += quantity;
+
+            let detail = format!(
+                "{} · +{} {} ({} on hand)",
+                ingredient.name,
+                format_amount(*quantity),
+                ingredient.unit,
+                format_amount(ingredient.on_hand)
+            );
+            next.activity
+                .insert(0, activity(action, "Stock received", detail));
         }
 
         ActionKind::Reset => {
@@ -954,6 +990,130 @@ mod tests {
 
         let reset = reduce(&sent, &action(ActionKind::Reset)).unwrap();
         assert_eq!(on_hand(&reset, "beet"), 16.0);
+    }
+
+    // --- restocking ---
+
+    fn restock(state: &PosState, id: &str, quantity: f64, action_id: &str) -> Option<PosState> {
+        reduce(
+            state,
+            &Action {
+                id: action_id.into(),
+                at: "2026-08-13T11:00:00.000Z".into(),
+                kind: ActionKind::RestockIngredient {
+                    ingredient_id: id.into(),
+                    quantity,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn a_delivery_adds_to_the_larder() {
+        let state = state();
+        assert_eq!(on_hand(&state, "carrot"), 3.0);
+
+        let restocked = restock(&state, "carrot", 15.0, "r1").expect("delivery booked in");
+
+        assert_eq!(on_hand(&restocked, "carrot"), 18.0);
+        assert_eq!(restocked.activity[0].action, "Stock received");
+        assert_eq!(
+            restocked.activity[0].detail,
+            "Carrots · +15 lb (18 on hand)"
+        );
+    }
+
+    #[test]
+    fn deliveries_accumulate() {
+        // Additive, so two people booking in stock do not overwrite each other.
+        let first = restock(&state(), "carrot", 5.0, "r1").unwrap();
+        let second = restock(&first, "carrot", 5.0, "r2").unwrap();
+        assert_eq!(on_hand(&second, "carrot"), 13.0);
+    }
+
+    #[test]
+    fn restocking_brings_a_sold_out_dish_back() {
+        // Exhaust carrots, then book a delivery in and confirm the engine
+        // sells the dish again.
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let mut state = seated;
+        for id in ["a", "b", "c"] {
+            state = reduce(
+                &state,
+                &Action {
+                    id: id.into(),
+                    at: "2026-08-13T10:00:00.000Z".into(),
+                    kind: ActionKind::AddOrderItem {
+                        guest_id: "guest-maya".into(),
+                        menu_item_id: "salmon-carrot".into(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        let sent = reduce(
+            &state,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(on_hand(&sent, "carrot"), 0.0);
+
+        let dishes_before =
+            crate::engine::recommend_dishes(sent.guest("guest-maya").unwrap(), &seed::menu_items(), &sent.ingredients);
+        assert!(!dishes_before.iter().find(|d| d.id == "salmon-carrot").unwrap().eligible);
+
+        let restocked = restock(&sent, "carrot", 18.0, "r1").unwrap();
+        let dishes_after = crate::engine::recommend_dishes(
+            restocked.guest("guest-maya").unwrap(),
+            &seed::menu_items(),
+            &restocked.ingredients,
+        );
+        let salmon = dishes_after.iter().find(|d| d.id == "salmon-carrot").unwrap();
+
+        assert!(salmon.eligible, "a restocked dish must be sellable again");
+        assert!(
+            !salmon.warnings.iter().any(|w| w.contains("unavailable")),
+            "{:?}",
+            salmon.warnings
+        );
+    }
+
+    #[test]
+    fn a_delivery_of_nothing_is_rejected() {
+        for quantity in [0.0, -5.0] {
+            assert!(
+                restock(&state(), "carrot", quantity, "r1").is_none(),
+                "quantity {quantity} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_delivery_is_rejected() {
+        // NaN would poison every later comparison: `on_hand <= 0.0` and
+        // `on_hand / par <= 0.25` both go false, so the dish would look
+        // available forever while holding an unusable amount.
+        for quantity in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                restock(&state(), "carrot", quantity, "r1").is_none(),
+                "quantity {quantity} should be refused"
+            );
+        }
+        assert_eq!(on_hand(&state(), "carrot"), 3.0);
+    }
+
+    #[test]
+    fn restocking_an_unknown_ingredient_is_rejected() {
+        assert!(restock(&state(), "unobtainium", 5.0, "r1").is_none());
+    }
+
+    #[test]
+    fn a_delivery_may_exceed_par() {
+        // Par is a target, not a ceiling — a bulk delivery is legitimate.
+        let restocked = restock(&state(), "beet", 100.0, "r1").unwrap();
+        assert_eq!(on_hand(&restocked, "beet"), 116.0);
     }
 
     #[test]

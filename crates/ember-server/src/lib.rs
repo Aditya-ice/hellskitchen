@@ -91,6 +91,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/stream", get(stream))
         .route("/api/menu", get(menu))
         .route("/api/recommendations/{guest_id}", get(recommendations))
+        .route("/api/summary", get(summary))
         .route("/api/demo-session", post(demo_session))
         .route("/api/elevenlabs/token", get(elevenlabs_token))
         .route("/api/tavily/search", post(tavily_search))
@@ -245,6 +246,54 @@ async fn recommendations(
         order_total: engine::order_total(revision.state.order_for_guest(&guest_id), &menu_items),
         guest_id,
         version: revision.version,
+    }))
+}
+
+/// Floor-wide numbers for the header.
+///
+/// Separate from the per-guest recommendations because these are properties of
+/// the service, not of whoever happens to be selected. The average wait needs
+/// the engine, so it cannot be computed in the browser.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FloorSummary {
+    version: i64,
+    waiting_guests: usize,
+    open_tables: usize,
+    /// Mean estimated wait across parties still waiting, in minutes. Zero when
+    /// nobody is waiting — which is a real answer, not a missing one.
+    average_wait_minutes: f64,
+}
+
+async fn summary(State(state): State<Shared>) -> ApiResult<Json<FloorSummary>> {
+    let revision = state.store.revision()?;
+    let floor = &revision.state;
+
+    let waiting: Vec<_> = floor
+        .guests
+        .iter()
+        .filter(|guest| guest.status == ember_core::GuestStatus::Waiting)
+        .collect();
+
+    let average_wait_minutes = if waiting.is_empty() {
+        0.0
+    } else {
+        let total: f64 = waiting
+            .iter()
+            .map(|guest| engine::estimate_wait(guest, &floor.tables))
+            .sum();
+        (total / waiting.len() as f64).round()
+    };
+
+    Ok(Json(FloorSummary {
+        version: revision.version,
+        waiting_guests: waiting.len(),
+        open_tables: floor
+            .tables
+            .iter()
+            .filter(|table| table.status == ember_core::TableStatus::Available)
+            .count(),
+        average_wait_minutes,
     }))
 }
 

@@ -8,7 +8,7 @@ Ember POS is a guest-focused, AI-assisted front-of-house prototype. It helps a h
 - Scores tables using party size, accessibility, seating preference, wait time, and server load.
 - Surfaces guest history, dietary needs, allergies, likes, and service notes.
 - Ranks dishes using hard safety constraints, live ingredient availability, preferences, prep time, popularity, and balanced value.
-- Consumes stock when a ticket is fired, so low-stock warnings fire during a service and a dish goes dark once its last portion is committed.
+- Consumes stock when a ticket is fired, so low-stock warnings fire during a service and a dish goes dark once its last portion is committed. The Larder panel books deliveries back in.
 - Captures guest and order notes by ElevenLabs voice transcription or typed fallback.
 - Uses Tavily for optional, source-linked dish background.
 - Offers a lightweight Stay22 map for guests who need nearby accommodation.
@@ -42,7 +42,8 @@ Stock is part of the state, not reference data: firing a ticket consumes it.
 One unit of each listed ingredient per serving — the menu carries no per-dish
 quantities, so that is the honest reading of the data available. Real recipe
 quantities would replace `consumption()` in `crates/ember-core/src/reducer.rs`
-and nothing else.
+and nothing else. Restocking is additive rather than "set to N", so two people
+booking in a delivery at once add up instead of overwriting each other.
 
 Hard safety rules — allergens, dietary conflicts, unavailable stock — live in
 `ember-core` and gate every recommendation. Nothing downstream may reverse that.

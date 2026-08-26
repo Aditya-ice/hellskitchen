@@ -25,16 +25,6 @@ fn clamp_score(score: f64) -> f64 {
     score.round().clamp(0.0, 100.0)
 }
 
-/// Renders a float the way a JS template literal would, so that reason strings
-/// read "Ready in about 8 min" rather than "Ready in about 8 min".
-fn format_number(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
-    }
-}
-
 pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
     let may_be_seated = matches!(
         guest.status,
@@ -133,7 +123,7 @@ pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommend
             if table.status == TableStatus::Clearing {
                 reasons.push(format!(
                     "Ready in about {} min",
-                    format_number(table.estimated_available_minutes)
+                    format_amount(table.estimated_available_minutes)
                 ));
             }
 

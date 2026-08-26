@@ -135,6 +135,31 @@ async fn recommendations_rank_the_best_table_first() {
 }
 
 #[tokio::test]
+async fn the_summary_reports_the_floor() {
+    let app = app();
+    let (status, body) = send(&app, get("/api/summary")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    // Maya and Priya are waiting; Noah is seated and Jordan has not arrived.
+    assert_eq!(body["waitingGuests"], 2);
+    assert_eq!(body["openTables"], 6);
+    // Both have a table free right now, so nobody is actually waiting on one.
+    assert_eq!(body["averageWaitMinutes"], 0.0);
+    assert_eq!(body["version"], 0);
+}
+
+#[tokio::test]
+async fn the_summary_follows_the_floor() {
+    let app = app();
+    send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+
+    let (_, body) = send(&app, get("/api/summary")).await;
+    assert_eq!(body["waitingGuests"], 1, "Maya is seated now");
+    assert_eq!(body["openTables"], 5);
+    assert_eq!(body["version"], 1);
+}
+
+#[tokio::test]
 async fn an_unknown_guest_is_a_404() {
     let app = app();
     let (status, _) = send(&app, get("/api/recommendations/nobody")).await;

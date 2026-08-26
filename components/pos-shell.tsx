@@ -29,6 +29,8 @@ import type { GuestProfile, TableStatus } from "@/lib/domain";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
 import { GuestTools } from "@/components/guest-tools";
+import { LarderPanel } from "@/components/larder-panel";
+import { useTodayLabel } from "@/lib/clock";
 import { onDesktopTabChange } from "@/lib/desktop";
 import { isLockedOrder, orderStageLabel } from "@/lib/orders";
 
@@ -64,6 +66,7 @@ function StatusPill({ status }: { status: GuestProfile["status"] }) {
 
 export function PosShell() {
   const pos = usePos();
+  const todayLabel = useTodayLabel();
   const [activeTab, setActiveTab] = useState<Tab>("arrivals");
   const [search, setSearch] = useState("");
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -101,8 +104,6 @@ export function PosShell() {
   const visibleMenu = pos.menuItems.filter(
     (item) => menuSection === "all" || item.section === menuSection,
   );
-  const openTables = pos.tables.filter((table) => table.status === "available").length;
-  const waitingGuests = pos.guests.filter((guest) => guest.status === "waiting");
 
   // The macOS app's View menu drives the same tabs from the keyboard.
   useEffect(
@@ -144,22 +145,24 @@ export function PosShell() {
       <div className="border-b border-line bg-white">
         <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <div>
-            <p className="eyebrow text-accent">Sunday dinner · August 9</p>
+            <p className="eyebrow text-accent">
+              {[pos.restaurant.serviceLabel, todayLabel].filter(Boolean).join(" · ")}
+            </p>
             <h1 className="mt-1 text-xl font-black tracking-tight sm:text-2xl">
               Front-of-house workspace
             </h1>
           </div>
           <div className="hidden items-center gap-5 md:flex">
             <div>
-              <p className="text-xl font-black">{waitingGuests.length}</p>
+              <p className="text-xl font-black">{pos.summary.waitingGuests}</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Waiting</p>
             </div>
             <div>
-              <p className="text-xl font-black">{openTables}</p>
+              <p className="text-xl font-black">{pos.summary.openTables}</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Open tables</p>
             </div>
             <div>
-              <p className="text-xl font-black">12m</p>
+              <p className="text-xl font-black">{pos.summary.averageWaitMinutes}m</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Avg wait</p>
             </div>
             {pos.connected ? null : (
@@ -561,6 +564,7 @@ export function PosShell() {
                   </div>
                 </div>
               )}
+              <LarderPanel />
             </aside>
 
             <section className="card overflow-hidden">

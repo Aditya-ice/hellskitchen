@@ -60,6 +60,14 @@ export interface RecommendationPayload {
   orderTotal: number;
 }
 
+/** Floor-wide numbers for the header. The average wait needs the engine. */
+export interface FloorSummary {
+  version: number;
+  waitingGuests: number;
+  openTables: number;
+  averageWaitMinutes: number;
+}
+
 export interface ActionOutcome extends Revision {
   outcome: "changed" | "rejected" | "duplicate";
 }
@@ -99,6 +107,14 @@ export async function fetchRecommendations(
     { credentials: "include", signal },
   );
   return readJson<RecommendationPayload>(response, "score this guest");
+}
+
+export async function fetchSummary(signal?: AbortSignal): Promise<FloorSummary> {
+  const response = await fetch(apiUrl("/api/summary"), {
+    credentials: "include",
+    signal,
+  });
+  return readJson<FloorSummary>(response, "read the floor summary");
 }
 
 export async function postAction(action: Action): Promise<ActionOutcome> {
