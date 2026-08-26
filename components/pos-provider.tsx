@@ -24,6 +24,7 @@ import type { Action } from "@/lib/generated/Action";
 import {
   ensureDemoSession,
   fetchMenu,
+  fetchForecast,
   fetchRecommendations,
   fetchSummary,
   newAction,
@@ -31,6 +32,7 @@ import {
   postAction,
   subscribeToState,
   type FloorSummary,
+  type Forecast,
   type MenuPayload,
   type Revision,
 } from "@/lib/pos-client";
@@ -53,6 +55,8 @@ export interface GuestInsight {
   dishes: Recommendation[];
   estimateWait: number;
   orderTotal: number;
+  /** Whether the brain reranked this, or it is the engine's own ordering. */
+  rankedBy: "engine" | "model";
 }
 
 const emptyInsight: GuestInsight = {
@@ -61,6 +65,7 @@ const emptyInsight: GuestInsight = {
   dishes: [],
   estimateWait: 0,
   orderTotal: 0,
+  rankedBy: "engine",
 };
 
 const emptySummary: FloorSummary = {
@@ -105,6 +110,8 @@ interface PosContextValue {
   insight: GuestInsight;
   /** Server-computed floor numbers for the header. */
   summary: FloorSummary;
+  /** Demand forecast from the optional brain; unavailable without it. */
+  forecast: Forecast;
 
   selectedGuestId: string | null;
   selectGuest: (id: string) => void;
@@ -136,6 +143,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = useState<MenuPayload>(emptyMenu);
   const [insight, setInsight] = useState<GuestInsight>(emptyInsight);
   const [summary, setSummary] = useState<FloorSummary>(emptySummary);
+  const [forecast, setForecast] = useState<Forecast>({ available: false });
   const [selectedGuestId, setSelectedGuestId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -199,6 +207,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           dishes: payload.dishes,
           estimateWait: payload.estimateWait,
           orderTotal: payload.orderTotal,
+          rankedBy: payload.rankedBy ?? "engine",
         }),
       )
       .catch(() => {
@@ -220,6 +229,25 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       });
     return () => controller.abort();
   }, [revision.version]);
+
+  // Stock forecasts move over minutes, not seconds, so this is on a timer
+  // rather than on every revision — the brain is optional and should not be
+  // asked a question per keystroke.
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = () =>
+      fetchForecast(controller.signal)
+        .then(setForecast)
+        .catch(() => {
+          // An unavailable forecast is the normal case without a brain.
+        });
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // Scores are only shown against the guest they were computed for. While a
   // newly selected guest is being scored the panel is empty rather than
@@ -353,6 +381,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       ingredients: state.ingredients,
       insight: activeInsight,
       summary,
+      forecast,
       selectedGuestId: effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,
@@ -375,6 +404,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       menu,
       activeInsight,
       summary,
+      forecast,
       effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,

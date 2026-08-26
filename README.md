@@ -49,17 +49,38 @@ booking in a delivery at once add up instead of overwriting each other.
 Hard safety rules — allergens, dietary conflicts, unavailable stock — live in
 `ember-core` and gate every recommendation. Nothing downstream may reverse that.
 
-## Floor agent
+## Model services
 
-`services/brain` answers natural-language questions about the service happening
+`services/brain` adds three things on top of the POS. All of them are optional,
+and only the first needs credentials — the other two are arithmetic over the
+action log.
+
+**Forecasting** projects where stock is heading from what has actually been
+consumed, and warns before a dish comes off the menu. **Reranking** reorders the
+engine's suggestions using what has been ordered tonight. Neither is a fitted
+model: with a service's worth of tickets there is nothing honest to fit, so both
+are transparent estimators that report their own confidence and degrade to the
+engine's own answer when the evidence is thin. `burn_per_hour` and the ranking
+score are what a real model would replace; the interfaces would not change.
+
+Two rules keep the reranker safe to bolt on. It only reorders dishes the engine
+has already cleared, and `ember-server` verifies on every response that the
+returned ranking has exactly the engine's eligibility — a reranker that tried to
+unblock a dish is discarded whole. Allergy decisions are never a model's to make.
+
+### Floor agent
+
+The agent answers natural-language questions about the service happening
 right now — "who has been waiting longest?", "what can I sell that uses up the
 carrots?". Optional in the strongest sense: not running, running without
 credentials, and failing mid-answer all produce a readable answer rather than
 an error, and the POS behaves identically either way.
 
 ```bash
-npm run brain    # http://127.0.0.1:4100, needs ANTHROPIC_API_KEY
+npm run brain    # http://127.0.0.1:4100
 ```
+
+The agent needs `ANTHROPIC_API_KEY`; forecasting and reranking do not.
 
 Then point the server at it with `EMBER_BRAIN_URL=http://127.0.0.1:4100`, and
 the brain back at the server with `EMBER_URL`. Everything reaches it through

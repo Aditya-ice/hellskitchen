@@ -160,6 +160,48 @@ async fn the_summary_follows_the_floor() {
 }
 
 #[tokio::test]
+async fn the_action_log_is_readable_for_anything_that_learns_from_it() {
+    let app = app();
+    send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    send(&app, post("/api/actions", seat("a2", "guest-priya", "t9"))).await;
+
+    let (status, body) = send(&app, get("/api/actions/log")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["latestSeq"], 2);
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["action"]["type"], "seat-guest");
+    assert_eq!(entries[0]["action"]["guestId"], "guest-maya");
+}
+
+#[tokio::test]
+async fn the_action_log_can_be_walked_forward() {
+    let app = app();
+    send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    send(&app, post("/api/actions", seat("a2", "guest-priya", "t9"))).await;
+
+    let (_, first) = send(&app, get("/api/actions/log?limit=1")).await;
+    assert_eq!(first["entries"].as_array().unwrap().len(), 1);
+
+    let (_, rest) = send(&app, get("/api/actions/log?since=1")).await;
+    let entries = rest["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["action"]["id"], "a2");
+}
+
+#[tokio::test]
+async fn an_absurd_log_limit_is_clamped_rather_than_honoured() {
+    // A caller asking for the whole world should not be able to make the
+    // server build an unbounded response.
+    let app = app();
+    let (status, body) = send(&app, get("/api/actions/log?limit=999999")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 0);
+}
+
+#[tokio::test]
 async fn an_unknown_guest_is_a_404() {
     let app = app();
     let (status, _) = send(&app, get("/api/recommendations/nobody")).await;

@@ -303,5 +303,17 @@ class FloorClient:
             summary=await self._get("/api/summary"),
         )
 
-    async def recommendations(self, guest_id: str) -> dict[str, Any]:
-        return await self._get(f"/api/recommendations/{guest_id}")
+    async def recommendations(self, guest_id: str, rerank: bool = True) -> dict[str, Any]:
+        """The engine's ranking.
+
+        `rerank=False` asks ember-server for the engine's own ordering without
+        calling back into this service — which is what stops `/rank` recursing
+        when it fetches its own input.
+        """
+        suffix = "" if rerank else "?rerank=false"
+        return await self._get(f"/api/recommendations/{guest_id}{suffix}")
+
+    async def action_log(self, since: int = 0, limit: int = 2000) -> list[dict[str, Any]]:
+        """The append-only log: what the forecaster and reranker learn from."""
+        payload = await self._get(f"/api/actions/log?since={since}&limit={limit}")
+        return payload.get("entries", [])

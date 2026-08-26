@@ -539,7 +539,20 @@ export function PosShell() {
                     </div>
                   )}
                   <div className="mt-4">
-                    <p className="text-xs font-black">AI picks for this guest</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-black">AI picks for this guest</p>
+                      {pos.insight.rankedBy === "model" && (
+                        // Only shown when the brain actually reranked. The
+                        // engine's own ordering must never be dressed up as
+                        // something it is not.
+                        <span
+                          className="rounded-full bg-navy/8 px-2 py-0.5 text-[10px] font-black text-navy"
+                          title="Reordered using what has actually been ordered tonight. Safety decisions are still the engine's."
+                        >
+                          Learned
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-2 space-y-2">
                       {dishRecommendations.filter((item) => item.eligible).slice(0, 3).map((recommendation, index) => {
                         const item = pos.menuItems.find((menuItem) => menuItem.id === recommendation.id)!;

@@ -83,6 +83,76 @@ pub async fn ask(client: &reqwest::Client, base: &str, question: &str) -> AgentA
     }
 }
 
+/// Where the forecast or the reranking came back from.
+#[derive(Debug, Clone, Deserialize)]
+struct Availability {
+    #[serde(default)]
+    available: bool,
+}
+
+/// Asks the brain to rerank the engine's dishes for one guest.
+///
+/// The engine's ranking is sent in the request rather than fetched by the
+/// brain: the brain reading it back from `/api/recommendations` would re-enter
+/// this function and recurse. Returns `None` on any failure, and the caller
+/// then serves the engine's own ordering — which is a correct answer, not a
+/// degraded one.
+pub async fn rerank(
+    client: &reqwest::Client,
+    base: &str,
+    guest_id: &str,
+    dishes: &[ember_core::Recommendation],
+) -> Option<Ranking> {
+    let response = client
+        .post(format!("{}/rank", base.trim_end_matches('/')))
+        .json(&serde_json::json!({ "guestId": guest_id, "dishes": dishes }))
+        // Short on purpose: this sits in front of every guest selection, so a
+        // slow brain must fall back rather than make the POS feel slow.
+        .timeout(Duration::from_millis(1500))
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let body: serde_json::Value = response.json().await.ok()?;
+    let availability: Availability = serde_json::from_value(body.clone()).ok()?;
+    if !availability.available {
+        return None;
+    }
+    serde_json::from_value(body).ok()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ranking {
+    pub dishes: Vec<ember_core::Recommendation>,
+    /// "model" or "engine" — the brain reports which it actually applied, so
+    /// the UI never claims model assistance it did not get.
+    pub ranked_by: String,
+    #[serde(default)]
+    pub tickets_seen: i64,
+}
+
+/// Reads the demand forecast. `None` when unavailable for any reason.
+pub async fn forecast(client: &reqwest::Client, base: &str) -> Option<serde_json::Value> {
+    let response = client
+        .get(format!("{}/forecast", base.trim_end_matches('/')))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    let availability: Availability = serde_json::from_value(body.clone()).ok()?;
+    availability.available.then_some(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

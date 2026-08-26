@@ -93,6 +93,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/menu", get(menu))
         .route("/api/recommendations/{guest_id}", get(recommendations))
         .route("/api/summary", get(summary))
+        .route("/api/actions/log", get(action_log))
+        .route("/api/forecast", get(forecast))
         .route("/api/agent/ask", post(agent_ask))
         .route("/api/demo-session", post(demo_session))
         .route("/api/elevenlabs/token", get(elevenlabs_token))
@@ -226,11 +228,23 @@ struct RecommendationPayload {
     dishes: Vec<Recommendation>,
     estimate_wait: f64,
     order_total: f64,
+    /// "engine" or "model". Honest about which ranking this actually is.
+    ranked_by: &'static str,
+}
+
+#[derive(Deserialize)]
+struct RecommendationQuery {
+    /// `false` serves the engine's own ordering without consulting the brain.
+    /// The brain uses this when it needs the engine ranking as its own input,
+    /// which is what stops the two calling each other in a loop.
+    #[serde(default)]
+    rerank: Option<bool>,
 }
 
 async fn recommendations(
     State(state): State<Shared>,
     Path(guest_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RecommendationQuery>,
 ) -> ApiResult<Json<RecommendationPayload>> {
     let revision = state.store.revision()?;
     let guest = revision.state.guest(&guest_id).ok_or_else(|| {
@@ -239,15 +253,103 @@ async fn recommendations(
 
     let menu_items = seed::menu_items();
 
+    // Scored against live stock, so a dish goes dark the moment the last
+    // portion is committed to another ticket.
+    let mut dishes = engine::recommend_dishes(guest, &menu_items, &revision.state.ingredients);
+    let mut ranked_by = "engine";
+
+    // Optional reranking by the brain. Any failure — absent, slow, erroring —
+    // leaves the engine's ordering in place, which is a correct answer rather
+    // than a degraded one, so none of this is worth surfacing as an error.
+    if query.rerank.unwrap_or(true) {
+        if let Some(base) = state.config.brain_url.as_deref() {
+            if let Some(ranking) = brain::rerank(&state.http, base, &guest_id, &dishes).await {
+                // Trust the engine's eligibility, not the brain's: a reranker
+                // that returned a blocked dish as sellable must not be able to
+                // put it in front of a server.
+                if preserves_eligibility(&dishes, &ranking.dishes) {
+                    dishes = ranking.dishes;
+                    ranked_by = if ranking.ranked_by == "model" { "model" } else { "engine" };
+                } else {
+                    eprintln!("floor reranker changed dish eligibility; ignoring its ranking");
+                }
+            }
+        }
+    }
+
     Ok(Json(RecommendationPayload {
         tables: engine::recommend_tables(guest, &revision.state.tables),
-        // Scored against live stock, so a dish goes dark the moment the last
-        // portion is committed to another ticket.
-        dishes: engine::recommend_dishes(guest, &menu_items, &revision.state.ingredients),
+        dishes,
         estimate_wait: engine::estimate_wait(guest, &revision.state.tables),
         order_total: engine::order_total(revision.state.order_for_guest(&guest_id), &menu_items),
         guest_id,
         version: revision.version,
+        ranked_by,
+    }))
+}
+
+/// Whether a reranking kept every dish's eligibility exactly as the engine set
+/// it, and lost none of them.
+///
+/// The last line of defence. `services/brain` is careful not to touch
+/// eligibility, but "careful" is a property of code that can change; this is
+/// checked on every response.
+fn preserves_eligibility(engine: &[Recommendation], reranked: &[Recommendation]) -> bool {
+    if engine.len() != reranked.len() {
+        return false;
+    }
+    engine.iter().all(|original| {
+        reranked
+            .iter()
+            .any(|candidate| candidate.id == original.id && candidate.eligible == original.eligible)
+    })
+}
+
+/// The optional demand forecast. Absent when the brain is not configured or
+/// not answering.
+async fn forecast(State(state): State<Shared>) -> Response {
+    let Some(base) = state.config.brain_url.as_deref() else {
+        return Json(serde_json::json!({ "available": false })).into_response();
+    };
+    match brain::forecast(&state.http, base).await {
+        Some(body) => Json(body).into_response(),
+        None => Json(serde_json::json!({ "available": false })).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogQuery {
+    #[serde(default)]
+    since: i64,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionLog {
+    /// Highest seq returned, for polling onward from.
+    latest_seq: i64,
+    total: i64,
+    entries: Vec<ember_store::LoggedAction>,
+}
+
+/// The append-only log, for anything that learns from what happened.
+///
+/// Read-only and paginated. The whole log of a long service is not something
+/// to hand over in one response, and a caller that wants it all can walk it.
+async fn action_log(
+    State(state): State<Shared>,
+    axum::extract::Query(query): axum::extract::Query<LogQuery>,
+) -> ApiResult<Json<ActionLog>> {
+    let limit = query.limit.unwrap_or(500).clamp(1, 2000);
+    let entries = state.store.actions(query.since.max(0), limit)?;
+
+    Ok(Json(ActionLog {
+        latest_seq: entries.last().map(|entry| entry.seq).unwrap_or(query.since),
+        total: state.store.action_count()?,
+        entries,
     }))
 }
 
@@ -491,4 +593,61 @@ pub async fn serve(state: Shared) -> std::io::Result<()> {
 /// process for it in between — so it binds first and hands the listener over.
 pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::io::Result<()> {
     axum::serve(listener, router(state)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dish(id: &str, eligible: bool) -> Recommendation {
+        Recommendation {
+            id: id.into(),
+            score: if eligible { 50.0 } else { 0.0 },
+            eligible,
+            reasons: vec![],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn a_pure_reordering_is_accepted() {
+        let engine = vec![dish("a", true), dish("b", true), dish("c", false)];
+        let reranked = vec![dish("b", true), dish("a", true), dish("c", false)];
+        assert!(preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn promoting_a_blocked_dish_to_sellable_is_refused() {
+        // The reranker has no business deciding this, and a bug there must not
+        // be able to put an allergen in front of a server.
+        let engine = vec![dish("a", true), dish("c", false)];
+        let reranked = vec![dish("c", true), dish("a", true)];
+        assert!(!preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn blocking_a_sellable_dish_is_also_refused() {
+        // Less dangerous, but still not the reranker's call.
+        let engine = vec![dish("a", true), dish("b", true)];
+        let reranked = vec![dish("a", true), dish("b", false)];
+        assert!(!preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn dropping_a_dish_is_refused() {
+        let engine = vec![dish("a", true), dish("b", true)];
+        assert!(!preserves_eligibility(&engine, &[dish("a", true)]));
+    }
+
+    #[test]
+    fn inventing_a_dish_is_refused() {
+        let engine = vec![dish("a", true)];
+        let reranked = vec![dish("a", true), dish("ghost", true)];
+        assert!(!preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn an_empty_ranking_matches_an_empty_menu() {
+        assert!(preserves_eligibility(&[], &[]));
+    }
 }

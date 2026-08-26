@@ -58,6 +58,37 @@ export interface RecommendationPayload {
   dishes: Recommendation[];
   estimateWait: number;
   orderTotal: number;
+  /** Which ranking this actually is — the brain may be absent or unhelpful. */
+  rankedBy: "engine" | "model";
+}
+
+export interface StockoutRisk {
+  ingredientId: string;
+  name: string;
+  onHand: number;
+  unit: string;
+  burnPerHour: number;
+  minutesToZero: number | null;
+  /** Dishes that come off the menu when this runs out. */
+  blocks: string[];
+}
+
+export interface Forecast {
+  available: boolean;
+  confidence?: "none" | "low" | "fair";
+  confidenceReason?: string;
+  actionable?: boolean;
+  stockoutRisks?: StockoutRisk[];
+}
+
+/** Never rejects on an absent brain: an unavailable forecast is a valid answer. */
+export async function fetchForecast(signal?: AbortSignal): Promise<Forecast> {
+  const response = await fetch(apiUrl("/api/forecast"), {
+    credentials: "include",
+    signal,
+  });
+  if (!response.ok) return { available: false };
+  return (await response.json()) as Forecast;
 }
 
 /** Floor-wide numbers for the header. The average wait needs the engine. */

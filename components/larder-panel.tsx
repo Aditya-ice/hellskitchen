@@ -1,6 +1,6 @@
 "use client";
 
-import { PackagePlus, TriangleAlert } from "lucide-react";
+import { Clock3, PackagePlus, TriangleAlert } from "lucide-react";
 import { usePos } from "@/components/pos-provider";
 import type { Ingredient } from "@/lib/domain";
 
@@ -26,6 +26,15 @@ export function topUpQuantity(ingredient: Ingredient): number {
 export function LarderPanel() {
   const pos = usePos();
 
+  // Only shown when the forecaster has enough evidence to be worth acting on.
+  // A projection built from one ticket would be a guess wearing a number.
+  const risks =
+    pos.forecast.available && pos.forecast.actionable
+      ? (pos.forecast.stockoutRisks ?? [])
+      : [];
+  const riskFor = (ingredientId: string) =>
+    risks.find((risk) => risk.ingredientId === ingredientId);
+
   const needsAttention = pos.ingredients
     .map((ingredient) => ({ ingredient, level: stockLevel(ingredient) }))
     .filter(({ level }) => level !== "ok")
@@ -46,11 +55,34 @@ export function LarderPanel() {
         )}
       </div>
 
-      {needsAttention.length === 0 ? (
+      {risks.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {risks
+            .filter((risk) => !needsAttention.some((item) => item.ingredient.id === risk.ingredientId))
+            .map((risk) => (
+              <li
+                key={risk.ingredientId}
+                className="rounded-xl border border-warning/40 bg-warning/8 p-3"
+              >
+                <p className="flex items-center gap-1.5 text-xs font-black text-[#8a5b06]">
+                  <Clock3 className="size-3" />
+                  {risk.name} runs out in ~{risk.minutesToZero}m
+                </p>
+                {risk.blocks.length > 0 && (
+                  <p className="mt-1 text-[10px] leading-4 text-ink-muted">
+                    Takes {risk.blocks.join(", ")} off the menu
+                  </p>
+                )}
+              </li>
+            ))}
+        </ul>
+      )}
+
+      {needsAttention.length === 0 && risks.length === 0 ? (
         <p className="mt-2 text-[11px] leading-4 text-ink-muted">
           Everything is stocked.
         </p>
-      ) : (
+      ) : needsAttention.length === 0 ? null : (
         <ul className="mt-2 space-y-2">
           {needsAttention.map(({ ingredient, level }) => (
             <li
@@ -77,6 +109,11 @@ export function LarderPanel() {
                       `${ingredient.onHand} of ${ingredient.par} ${ingredient.unit}`
                     )}
                   </p>
+                  {riskFor(ingredient.id)?.minutesToZero != null && level !== "out" && (
+                    <p className="mt-0.5 text-[10px] font-bold text-[#8a5b06]">
+                      Out in ~{riskFor(ingredient.id)!.minutesToZero}m at this rate
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"
