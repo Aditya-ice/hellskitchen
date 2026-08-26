@@ -28,14 +28,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     };
     tray.set_title(Some(summarise(
-        &desktop.server.store.revision().map(|r| r.state).unwrap_or(
-            PosState {
-                tables: vec![],
-                guests: vec![],
-                orders: vec![],
-                activity: vec![],
-            },
-        ),
+        &desktop
+            .server
+            .store
+            .revision()
+            .map(|revision| revision.state)
+            .unwrap_or_else(|_| PosState::empty()),
     )))?;
 
     let mut updates = desktop.server.subscribe();

@@ -108,6 +108,32 @@ fn is_open(order: &Order) -> bool {
     }
 }
 
+/// How much of each ingredient a set of order lines consumes.
+///
+/// One unit of each listed ingredient per serving. The menu carries no
+/// per-dish quantities, so this is the honest reading of the data we have —
+/// enough for stock to move visibly during a service and for the low-stock and
+/// unavailable rules to fire. Real recipe quantities would replace this, and
+/// only this function would change.
+fn consumption(lines: &[OrderLine]) -> Vec<(String, f64)> {
+    let menu = seed::menu_items();
+    let mut totals: Vec<(String, f64)> = Vec::new();
+
+    for line in lines {
+        let Some(item) = menu.iter().find(|item| item.id == line.menu_item_id) else {
+            continue;
+        };
+        for ingredient_id in &item.ingredient_ids {
+            let servings = line.quantity as f64;
+            match totals.iter_mut().find(|(id, _)| id == ingredient_id) {
+                Some((_, total)) => *total += servings,
+                None => totals.push((ingredient_id.clone(), servings)),
+            }
+        }
+    }
+    totals
+}
+
 fn activity(action: &Action, label: &str, detail: String) -> ActivityEvent {
     ActivityEvent {
         id: format!("{}-activity", action.id),
@@ -306,6 +332,22 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
             }
             order.status = OrderStatus::Sent;
             order.sent_at = Some(action.at.clone());
+
+            // Stock is committed when the ticket is fired, not when it is
+            // bumped: that is the point the kitchen starts cooking it.
+            let consumed = consumption(&order.lines.clone());
+            for (ingredient_id, quantity) in consumed {
+                if let Some(ingredient) = next
+                    .ingredients
+                    .iter_mut()
+                    .find(|item| item.id == ingredient_id)
+                {
+                    // Never below zero. The engine already blocks ordering a
+                    // dish whose stock has run out, so this only guards
+                    // against two tickets firing against the last portion.
+                    ingredient.on_hand = (ingredient.on_hand - quantity).max(0.0);
+                }
+            }
 
             for guest in next.guests.iter_mut().filter(|item| item.id == *guest_id) {
                 guest.status = GuestStatus::Ordered;
@@ -753,6 +795,165 @@ mod tests {
                 "a completed order must reject every edit"
             );
         }
+    }
+
+    // --- stock ---
+
+    fn on_hand(state: &PosState, id: &str) -> f64 {
+        state.ingredient(id).expect("seeded ingredient").on_hand
+    }
+
+    #[test]
+    fn firing_a_ticket_consumes_its_ingredients() {
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        // Cedar Salmon uses salmon and carrot.
+        let with_item = reduce(
+            &seated,
+            &action(ActionKind::AddOrderItem {
+                guest_id: "guest-maya".into(),
+                menu_item_id: "salmon-carrot".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(on_hand(&with_item, "salmon"), 24.0, "a draft consumes nothing");
+        assert_eq!(on_hand(&with_item, "carrot"), 3.0);
+
+        let sent = reduce(
+            &with_item,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(on_hand(&sent, "salmon"), 23.0);
+        assert_eq!(on_hand(&sent, "carrot"), 2.0);
+        // Untouched ingredients stay put.
+        assert_eq!(on_hand(&sent, "beef"), 8.0);
+    }
+
+    #[test]
+    fn quantity_scales_consumption() {
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let mut state = seated;
+        for id in ["a", "b", "c"] {
+            state = reduce(
+                &state,
+                &Action {
+                    id: id.into(),
+                    at: "2026-08-13T10:00:00.000Z".into(),
+                    kind: ActionKind::AddOrderItem {
+                        guest_id: "guest-maya".into(),
+                        menu_item_id: "beet-salad".into(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            state.order_for_guest("guest-maya").unwrap().lines[0].quantity,
+            3
+        );
+
+        let sent = reduce(
+            &state,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(on_hand(&sent, "beet"), 13.0, "16 on hand less three servings");
+    }
+
+    #[test]
+    fn a_dish_becomes_ineligible_once_its_stock_runs_out() {
+        // Carrots start at 3. Three carrot dishes exhaust them, and the
+        // engine must then refuse anything else that needs one.
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let mut state = seated;
+        for id in ["a", "b", "c"] {
+            state = reduce(
+                &state,
+                &Action {
+                    id: id.into(),
+                    at: "2026-08-13T10:00:00.000Z".into(),
+                    kind: ActionKind::AddOrderItem {
+                        guest_id: "guest-maya".into(),
+                        menu_item_id: "salmon-carrot".into(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        let sent = reduce(
+            &state,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(on_hand(&sent, "carrot"), 0.0);
+
+        let guest = sent.guest("guest-maya").unwrap();
+        let dishes = crate::engine::recommend_dishes(guest, &seed::menu_items(), &sent.ingredients);
+        let salmon = dishes.iter().find(|d| d.id == "salmon-carrot").unwrap();
+
+        assert!(!salmon.eligible, "a dish with no carrots left cannot be sold");
+        assert!(salmon
+            .warnings
+            .iter()
+            .any(|w| w == "Carrots is unavailable"));
+    }
+
+    #[test]
+    fn stock_never_goes_negative() {
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let mut state = seated;
+        // Ten servings against three carrots on hand.
+        for index in 0..10 {
+            state = reduce(
+                &state,
+                &Action {
+                    id: format!("a{index}"),
+                    at: "2026-08-13T10:00:00.000Z".into(),
+                    kind: ActionKind::AddOrderItem {
+                        guest_id: "guest-maya".into(),
+                        menu_item_id: "salmon-carrot".into(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        let sent = reduce(
+            &state,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(on_hand(&sent, "carrot"), 0.0);
+    }
+
+    #[test]
+    fn bumping_a_ticket_does_not_consume_stock_again() {
+        let sent = fired_ticket();
+        let before = on_hand(&sent, "beet");
+        let order_id = sent.order_for_guest("guest-maya").unwrap().id.clone();
+
+        let bumped = complete(&sent, &order_id, "b1").unwrap();
+        assert_eq!(on_hand(&bumped, "beet"), before);
+    }
+
+    #[test]
+    fn reset_restores_the_larder() {
+        let sent = fired_ticket();
+        assert_ne!(on_hand(&sent, "beet"), 16.0);
+
+        let reset = reduce(&sent, &action(ActionKind::Reset)).unwrap();
+        assert_eq!(on_hand(&reset, "beet"), 16.0);
     }
 
     #[test]

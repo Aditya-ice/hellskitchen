@@ -148,8 +148,101 @@ async fn the_menu_is_served_from_the_rust_seed() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["menuItems"].as_array().unwrap().len(), 9);
-    assert_eq!(body["ingredients"].as_array().unwrap().len(), 11);
     assert_eq!(body["restaurant"]["name"], "Ember & Ash");
+    assert!(
+        body["ingredients"].is_null(),
+        "stock moves during a service, so it belongs to state, not to reference data"
+    );
+}
+
+#[tokio::test]
+async fn stock_is_part_of_the_pushed_state() {
+    let app = app();
+    let (_, body) = send(&app, get("/api/state")).await;
+
+    let carrots = body["state"]["ingredients"]
+        .as_array()
+        .expect("ingredients travel with the state")
+        .iter()
+        .find(|item| item["id"] == "carrot")
+        .unwrap()
+        .clone();
+    assert_eq!(carrots["onHand"], 3.0);
+}
+
+#[tokio::test]
+async fn firing_tickets_depletes_stock_and_takes_the_dish_off_the_menu() {
+    let app = app();
+
+    let step = |id: &str, kind: Value| {
+        let mut action = json!({ "id": id, "at": "2026-08-13T10:00:00.000Z" });
+        action
+            .as_object_mut()
+            .unwrap()
+            .extend(kind.as_object().unwrap().clone());
+        action
+    };
+
+    send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+
+    // Cedar Salmon needs carrots, and only three are on hand.
+    for id in ["a2", "a3", "a4"] {
+        send(
+            &app,
+            post(
+                "/api/actions",
+                step(
+                    id,
+                    json!({ "type": "add-order-item", "guestId": "guest-maya", "menuItemId": "salmon-carrot" }),
+                ),
+            ),
+        )
+        .await;
+    }
+
+    // Still a draft: nothing is committed until the ticket is fired.
+    let (_, before) = send(&app, get("/api/recommendations/guest-maya")).await;
+    let salmon_before = before["dishes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|dish| dish["id"] == "salmon-carrot")
+        .unwrap()
+        .clone();
+    assert_eq!(salmon_before["eligible"], true);
+
+    send(
+        &app,
+        post(
+            "/api/actions",
+            step("a5", json!({ "type": "send-order", "guestId": "guest-maya" })),
+        ),
+    )
+    .await;
+
+    let (_, state) = send(&app, get("/api/state")).await;
+    let carrots = state["state"]["ingredients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "carrot")
+        .unwrap()
+        .clone();
+    assert_eq!(carrots["onHand"], 0.0);
+
+    let (_, after) = send(&app, get("/api/recommendations/guest-maya")).await;
+    let salmon_after = after["dishes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|dish| dish["id"] == "salmon-carrot")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        salmon_after["eligible"], false,
+        "the dish must go dark once its stock is committed"
+    );
+    assert_eq!(salmon_after["score"], 0.0);
 }
 
 #[tokio::test]

@@ -11,7 +11,6 @@
 
 import type { Action } from "@/lib/generated/Action";
 import type { GuestProfile } from "@/lib/generated/GuestProfile";
-import type { Ingredient } from "@/lib/generated/Ingredient";
 import type { MenuItem } from "@/lib/generated/MenuItem";
 import type { PosState } from "@/lib/generated/PosState";
 import type { Recommendation } from "@/lib/generated/Recommendation";
@@ -45,10 +44,10 @@ export interface Revision {
   state: PosState;
 }
 
+/** Static reference data. Live stock arrives with the state, not here. */
 export interface MenuPayload {
   restaurant: Restaurant;
   menuItems: MenuItem[];
-  ingredients: Ingredient[];
   staff: StaffMember[];
 }
 

@@ -208,9 +208,31 @@ pub struct PosState {
     pub guests: Vec<GuestProfile>,
     pub orders: Vec<Order>,
     pub activity: Vec<ActivityEvent>,
+    /// Live stock. Part of the state rather than static reference data,
+    /// because firing an order consumes it — which is what makes the low-stock
+    /// warnings mean anything during a service.
+    ///
+    /// Defaulted so that a service saved before stock was tracked still loads.
+    /// A full larder is the honest reading of such a snapshot: nothing was
+    /// being consumed while it was written.
+    #[serde(default = "crate::seed::ingredients")]
+    pub ingredients: Vec<Ingredient>,
 }
 
 impl PosState {
+    /// A state with nothing in it, for callers that need a placeholder before
+    /// the real one has loaded. Prefer this over a struct literal so adding a
+    /// field does not break every such call site.
+    pub fn empty() -> Self {
+        Self {
+            tables: vec![],
+            guests: vec![],
+            orders: vec![],
+            activity: vec![],
+            ingredients: vec![],
+        }
+    }
+
     pub fn guest(&self, id: &str) -> Option<&GuestProfile> {
         self.guests.iter().find(|guest| guest.id == id)
     }
@@ -221,6 +243,10 @@ impl PosState {
 
     pub fn order_for_guest(&self, guest_id: &str) -> Option<&Order> {
         self.orders.iter().find(|order| order.guest_id == guest_id)
+    }
+
+    pub fn ingredient(&self, id: &str) -> Option<&Ingredient> {
+        self.ingredients.iter().find(|item| item.id == id)
     }
 
     pub fn table_seating(&self, guest_id: &str) -> Option<&Table> {

@@ -395,5 +395,6 @@ pub fn initial_state() -> PosState {
         guests: guests(),
         orders: orders(),
         activity: vec![],
+        ingredients: ingredients(),
     }
 }

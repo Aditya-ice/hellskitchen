@@ -70,7 +70,6 @@ const emptyMenu: MenuPayload = {
     covers: 0,
   },
   menuItems: [],
-  ingredients: [],
   staff: [],
 };
 
@@ -89,8 +88,9 @@ interface PosContextValue {
   // reference data, served by the same Rust seed the engine scores against
   restaurant: Restaurant;
   menuItems: MenuItem[];
-  ingredients: Ingredient[];
   staff: StaffMember[];
+  /** Live stock — part of the state, so it moves as tickets are fired. */
+  ingredients: Ingredient[];
 
   /** Server-computed scores for the selected guest. */
   insight: GuestInsight;
@@ -115,7 +115,7 @@ const PosContext = createContext<PosContextValue | null>(null);
 
 const emptyRevision: Revision = {
   version: -1,
-  state: { tables: [], guests: [], orders: [], activity: [] },
+  state: { tables: [], guests: [], orders: [], activity: [], ingredients: [] },
 };
 
 export function PosProvider({ children }: { children: React.ReactNode }) {
@@ -316,8 +316,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       error,
       restaurant: menu.restaurant,
       menuItems: menu.menuItems,
-      ingredients: menu.ingredients,
       staff: menu.staff,
+      ingredients: state.ingredients,
       insight: activeInsight,
       selectedGuestId: effectiveSelectedGuestId,
       selectGuest,

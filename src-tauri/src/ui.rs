@@ -50,14 +50,14 @@ pub fn watch_for_notifications(app: &AppHandle) {
         return;
     };
     let mut updates = desktop.server.subscribe();
-    let mut seen = Seen::from(&desktop.server.store.revision().map(|r| r.state).unwrap_or_else(
-        |_| PosState {
-            tables: vec![],
-            guests: vec![],
-            orders: vec![],
-            activity: vec![],
-        },
-    ));
+    let mut seen = Seen::from(
+        &desktop
+            .server
+            .store
+            .revision()
+            .map(|revision| revision.state)
+            .unwrap_or_else(|_| PosState::empty()),
+    );
     let handle = app.clone();
 
     tauri::async_runtime::spawn(async move {

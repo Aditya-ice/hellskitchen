@@ -198,10 +198,11 @@ async fn stream(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Static reference data. Live stock is not here — it moves during a service,
+/// so it belongs to the state the stream pushes.
 struct MenuPayload {
     restaurant: seed::Restaurant,
     menu_items: Vec<ember_core::MenuItem>,
-    ingredients: Vec<ember_core::Ingredient>,
     staff: Vec<ember_core::StaffMember>,
 }
 
@@ -209,7 +210,6 @@ async fn menu() -> Json<MenuPayload> {
     Json(MenuPayload {
         restaurant: seed::restaurant(),
         menu_items: seed::menu_items(),
-        ingredients: seed::ingredients(),
         staff: seed::staff(),
     })
 }
@@ -235,11 +235,12 @@ async fn recommendations(
     })?;
 
     let menu_items = seed::menu_items();
-    let ingredients = seed::ingredients();
 
     Ok(Json(RecommendationPayload {
         tables: engine::recommend_tables(guest, &revision.state.tables),
-        dishes: engine::recommend_dishes(guest, &menu_items, &ingredients),
+        // Scored against live stock, so a dish goes dark the moment the last
+        // portion is committed to another ticket.
+        dishes: engine::recommend_dishes(guest, &menu_items, &revision.state.ingredients),
         estimate_wait: engine::estimate_wait(guest, &revision.state.tables),
         order_total: engine::order_total(revision.state.order_for_guest(&guest_id), &menu_items),
         guest_id,

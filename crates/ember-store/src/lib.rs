@@ -378,6 +378,39 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_written_before_stock_was_tracked_still_loads() {
+        // Snapshots are persisted JSON, so every field added to PosState is a
+        // migration. This is the shape the store wrote before `ingredients`
+        // existed; without a default it fails with "missing field".
+        let legacy = serde_json::json!({
+            "tables": [],
+            "guests": [],
+            "orders": [],
+            "activity": []
+        })
+        .to_string();
+
+        let store = Store::in_memory().unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE snapshot SET version = 7, state = ?1 WHERE id = 1",
+                    [&legacy],
+                )
+                .unwrap();
+        }
+
+        let revision = store.revision().expect("a legacy snapshot must still load");
+        assert_eq!(revision.version, 7);
+        assert_eq!(
+            revision.state.ingredients.len(),
+            seed::ingredients().len(),
+            "a service saved before stock was tracked starts from a full larder"
+        );
+    }
+
+    #[test]
     fn the_log_can_be_read_incrementally() {
         let store = Store::in_memory().unwrap();
         changed(store.apply(&seat("a1", "guest-maya", "t2")).unwrap());
