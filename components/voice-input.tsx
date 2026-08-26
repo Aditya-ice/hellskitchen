@@ -130,7 +130,7 @@ export function VoiceInput({
         placeholder={placeholder}
         rows={rows}
         disabled={disabled}
-        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10"
+        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10 disabled:cursor-not-allowed disabled:border-line/60 disabled:bg-surface-muted disabled:text-ink-muted"
       />
       <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
         <Waves className="size-3" />

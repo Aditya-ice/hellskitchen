@@ -1,16 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CircleAlert, Clock3, Flame, ShieldAlert } from "lucide-react";
+import { Check, CircleAlert, Clock3, Flame, ShieldAlert } from "lucide-react";
 import { usePos } from "@/components/pos-provider";
 import type { GuestProfile, Order } from "@/lib/domain";
 
 /**
  * Back-of-house ticket rail, for a second screen above the pass.
  *
- * Read-only by design: the kitchen watches, the floor decides. It shares the
- * same live state as every other surface, so a ticket appears here the instant
- * a server fires it.
+ * Shares the same live state as every other surface, so a ticket appears here
+ * the instant a server fires it. The one thing the kitchen owns is bumping:
+ * marking a ticket away clears it from the rail and from the menu-bar count.
+ * Everything else about the floor is the host's to decide.
  */
 
 /** Minutes since an order was fired. */
@@ -128,6 +129,7 @@ export function KitchenDisplay() {
               nameFor={(id) =>
                 pos.menuItems.find((item) => item.id === id)?.name ?? id
               }
+              onBump={() => pos.completeOrder(order.id)}
             />
           ))}
         </div>
@@ -142,12 +144,14 @@ function Ticket({
   tableLabel,
   minutes,
   nameFor,
+  onBump,
 }: {
   order: Order;
   guest: GuestProfile | undefined;
   tableLabel: string;
   minutes: number;
   nameFor: (menuItemId: string) => string;
+  onBump: () => void;
 }) {
   const level = urgency(minutes);
 
@@ -195,6 +199,15 @@ function Ticket({
           {order.guestNotes}
         </p>
       ) : null}
+
+      <button
+        type="button"
+        onClick={onBump}
+        className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-navy py-3 text-sm font-black text-white hover:bg-navy/90"
+      >
+        <Check className="size-4" />
+        Bump {tableLabel}
+      </button>
     </article>
   );
 }

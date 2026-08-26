@@ -69,6 +69,11 @@ pub enum ActionKind {
     SendOrder {
         guest_id: String,
     },
+    /// Bumped from the pass. Addressed by order id rather than guest id: the
+    /// kitchen works from tickets, not from who is sitting where.
+    CompleteOrder {
+        order_id: String,
+    },
     Reset,
 }
 
@@ -84,16 +89,22 @@ impl ActionKind {
             ActionKind::RemoveOrderItem { .. } => "remove-order-item",
             ActionKind::UpdateOrderNotes { .. } => "update-order-notes",
             ActionKind::SendOrder { .. } => "send-order",
+            ActionKind::CompleteOrder { .. } => "complete-order",
             ActionKind::Reset => "reset",
         }
     }
 }
 
 /// An order accepts edits only while it is still a draft.
+///
+/// An allow-list on purpose. The TypeScript this replaced deny-listed "sent"
+/// in two places and allow-listed "draft" in a third, which was equivalent only
+/// while the enum had exactly two values — adding `Completed` here is what that
+/// bug was waiting for.
 fn is_open(order: &Order) -> bool {
     match order.status {
         OrderStatus::Draft => true,
-        OrderStatus::Sent => false,
+        OrderStatus::Sent | OrderStatus::Completed => false,
     }
 }
 
@@ -220,6 +231,7 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
                     guest_notes: String::new(),
                     created_at: action.at.clone(),
                     sent_at: None,
+                    completed_at: None,
                 }),
             }
 
@@ -305,6 +317,39 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
                     action,
                     "Order sent",
                     format!("{guest_name} order sent to kitchen"),
+                ),
+            );
+        }
+
+        ActionKind::CompleteOrder { order_id } => {
+            let order = next.orders.iter_mut().find(|order| order.id == *order_id)?;
+            // Only a ticket that actually reached the kitchen can be bumped.
+            if order.status != OrderStatus::Sent {
+                return None;
+            }
+            order.status = OrderStatus::Completed;
+            order.completed_at = Some(action.at.clone());
+
+            let guest_id = order.guest_id.clone();
+            let table_label = next
+                .orders
+                .iter()
+                .find(|order| order.id == *order_id)
+                .and_then(|order| order.table_id.as_deref())
+                .and_then(|id| next.tables.iter().find(|table| table.id == id))
+                .map(|table| table.label.clone())
+                .unwrap_or_else(|| "—".into());
+            let guest_name = next
+                .guest(&guest_id)
+                .map(|guest| guest.name.clone())
+                .unwrap_or_else(|| "A party".into());
+
+            next.activity.insert(
+                0,
+                activity(
+                    action,
+                    "Ticket completed",
+                    format!("{guest_name} · {table_label} away from the pass"),
                 ),
             );
         }
@@ -587,6 +632,127 @@ mod tests {
             reduce(&added, &action(ActionKind::AddWalkIn { guest: walk_in })).is_none(),
             "the same walk-in must not be added twice"
         );
+    }
+
+    fn fired_ticket() -> PosState {
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce(
+            &seated,
+            &action(ActionKind::AddOrderItem {
+                guest_id: "guest-maya".into(),
+                menu_item_id: "beet-salad".into(),
+            }),
+        )
+        .unwrap();
+        reduce(
+            &with_item,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            }),
+        )
+        .unwrap()
+    }
+
+    fn complete(state: &PosState, order_id: &str, id: &str) -> Option<PosState> {
+        reduce(
+            state,
+            &Action {
+                id: id.into(),
+                at: "2026-08-13T10:30:00.000Z".into(),
+                kind: ActionKind::CompleteOrder {
+                    order_id: order_id.into(),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn the_kitchen_can_bump_a_fired_ticket() {
+        let sent = fired_ticket();
+        let order_id = sent.order_for_guest("guest-maya").unwrap().id.clone();
+
+        let bumped = complete(&sent, &order_id, "b1").expect("ticket bumped");
+        let order = bumped.order_for_guest("guest-maya").unwrap();
+
+        assert_eq!(order.status, OrderStatus::Completed);
+        assert_eq!(order.completed_at.as_deref(), Some("2026-08-13T10:30:00.000Z"));
+        assert_eq!(bumped.activity[0].action, "Ticket completed");
+        assert!(bumped.activity[0].detail.contains("T2"), "{:?}", bumped.activity[0]);
+    }
+
+    #[test]
+    fn bumping_a_ticket_leaves_the_party_where_they_are() {
+        // Food leaving the pass says nothing about the table: the party is
+        // still sitting there eating it.
+        let sent = fired_ticket();
+        let order_id = sent.order_for_guest("guest-maya").unwrap().id.clone();
+        let bumped = complete(&sent, &order_id, "b1").unwrap();
+
+        assert_eq!(
+            bumped.guest("guest-maya").unwrap().status,
+            GuestStatus::Ordered
+        );
+        let table = bumped.table("t2").unwrap();
+        assert_eq!(table.status, TableStatus::Occupied);
+        assert_eq!(table.seated_guest_id.as_deref(), Some("guest-maya"));
+    }
+
+    #[test]
+    fn a_ticket_cannot_be_bumped_twice() {
+        let sent = fired_ticket();
+        let order_id = sent.order_for_guest("guest-maya").unwrap().id.clone();
+        let bumped = complete(&sent, &order_id, "b1").unwrap();
+
+        assert!(
+            complete(&bumped, &order_id, "b2").is_none(),
+            "a second bump must not duplicate the activity entry"
+        );
+    }
+
+    #[test]
+    fn a_draft_order_cannot_be_bumped() {
+        // Seating opens a draft. Nothing has reached the kitchen to bump.
+        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let order_id = seated.order_for_guest("guest-maya").unwrap().id.clone();
+
+        assert!(complete(&seated, &order_id, "b1").is_none());
+    }
+
+    #[test]
+    fn bumping_an_unknown_ticket_is_rejected() {
+        assert!(complete(&fired_ticket(), "order-does-not-exist", "b1").is_none());
+    }
+
+    #[test]
+    fn a_completed_order_stays_immutable() {
+        // The guard that matters: `is_open` allow-lists Draft, so Completed is
+        // refused for the same reason Sent is.
+        let sent = fired_ticket();
+        let order_id = sent.order_for_guest("guest-maya").unwrap().id.clone();
+        let bumped = complete(&sent, &order_id, "b1").unwrap();
+
+        for rejected in [
+            ActionKind::AddOrderItem {
+                guest_id: "guest-maya".into(),
+                menu_item_id: "cauliflower".into(),
+            },
+            ActionKind::RemoveOrderItem {
+                guest_id: "guest-maya".into(),
+                menu_item_id: "beet-salad".into(),
+            },
+            ActionKind::UpdateOrderNotes {
+                guest_id: "guest-maya".into(),
+                notes: "Changed".into(),
+            },
+            ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            },
+        ] {
+            assert!(
+                reduce(&bumped, &action(rejected)).is_none(),
+                "a completed order must reject every edit"
+            );
+        }
     }
 
     #[test]

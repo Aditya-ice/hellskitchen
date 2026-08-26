@@ -56,6 +56,9 @@ pub enum GuestStatus {
 pub enum OrderStatus {
     Draft,
     Sent,
+    /// Bumped from the pass: the food has gone out. The party may still be
+    /// seated, so this says nothing about the table.
+    Completed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -183,6 +186,8 @@ pub struct Order {
     /// pass actually cares about — is measured from here, not from
     /// `created_at`, which is when the party sat down.
     pub sent_at: Option<String>,
+    /// When the kitchen bumped the ticket.
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

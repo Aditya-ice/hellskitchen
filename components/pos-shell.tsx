@@ -30,6 +30,7 @@ import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
 import { GuestTools } from "@/components/guest-tools";
 import { onDesktopTabChange } from "@/lib/desktop";
+import { isLockedOrder, orderStageLabel } from "@/lib/orders";
 
 type Tab = "arrivals" | "floor" | "order" | "guest";
 
@@ -541,7 +542,7 @@ export function PosShell() {
                           <button
                             key={item.id}
                             type="button"
-                            disabled={!selectedTable || selectedOrder?.status === "sent"}
+                            disabled={!selectedTable || isLockedOrder(selectedOrder)}
                             onClick={() => pos.addOrderItem(selectedGuest.id, item.id)}
                             className="w-full rounded-xl border border-line p-3 text-left hover:border-accent disabled:opacity-50"
                           >
@@ -622,7 +623,7 @@ export function PosShell() {
                         </span>
                         <button
                           type="button"
-                          disabled={!selectedGuest || !selectedTable || !recommendation?.eligible || selectedOrder?.status === "sent"}
+                          disabled={!selectedGuest || !selectedTable || !recommendation?.eligible || isLockedOrder(selectedOrder)}
                           onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
                           className="grid size-8 place-items-center rounded-full bg-navy text-white hover:bg-accent disabled:bg-surface-muted disabled:text-ink-muted"
                           aria-label={`Add ${item.name}`}
@@ -665,7 +666,7 @@ export function PosShell() {
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              disabled={selectedOrder?.status === "sent"}
+                              disabled={isLockedOrder(selectedOrder)}
                               onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, item.id)}
                               className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
                               aria-label={`Remove one ${item.name}`}
@@ -675,7 +676,7 @@ export function PosShell() {
                             <span className="w-4 text-center text-xs font-black">{line.quantity}</span>
                             <button
                               type="button"
-                              disabled={selectedOrder?.status === "sent"}
+                              disabled={isLockedOrder(selectedOrder)}
                               onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
                               className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
                               aria-label={`Add one ${item.name}`}
@@ -696,7 +697,7 @@ export function PosShell() {
                       onChange={(notes) => pos.updateOrderNotes(selectedGuest.id, notes)}
                       placeholder="e.g. Fire mains after starters, sauce on side…"
                       rows={2}
-                      disabled={selectedOrder.status === "sent"}
+                      disabled={isLockedOrder(selectedOrder)}
                     />
                   </div>
                 )}
@@ -708,11 +709,11 @@ export function PosShell() {
                 </div>
                 <button
                   type="button"
-                  disabled={!selectedGuest || !selectedOrder?.lines.length || selectedOrder.status === "sent"}
+                  disabled={!selectedGuest || !selectedOrder?.lines.length || isLockedOrder(selectedOrder)}
                   onClick={() => selectedGuest && pos.sendOrder(selectedGuest.id)}
                   className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-3 text-sm font-black text-white hover:bg-accent-dark disabled:bg-line disabled:text-ink-muted"
                 >
-                  {selectedOrder?.status === "sent" ? <><Check className="size-4" /> Sent to kitchen</> : <>Send order <ArrowRight className="size-4" /></>}
+                  {isLockedOrder(selectedOrder) ? <><Check className="size-4" /> {orderStageLabel(selectedOrder)}</> : <>Send order <ArrowRight className="size-4" /></>}
                 </button>
               </div>
             </aside>

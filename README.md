@@ -83,7 +83,10 @@ What the native shell adds over a browser tab:
 
 - **Menu bar** — live ticket count and the age of the oldest ticket.
 - **Kitchen Display** (⌘K) — a ticket rail for a second screen above the pass.
-  Tickets turn amber at 10 minutes and red at 20.
+  Tickets turn amber at 10 minutes and red at 20, and are bumped from the rail
+  when the food goes out. Bumping is the one thing the kitchen owns; it clears
+  the ticket and the menu-bar count, and says nothing about the table — the
+  party is still sitting there eating.
 - **Notifications** — when an order is fired, and when a party with recorded
   allergies is seated.
 - **⌘1–⌘4** to move between Arrivals, Floor, Order and Guest; **⌘R** to reset

@@ -8,4 +8,8 @@ export type Order = { id: string, guestId: string, tableId: string | null, statu
  * pass actually cares about — is measured from here, not from
  * `created_at`, which is when the party sat down.
  */
-sentAt: string | null, };
+sentAt: string | null, 
+/**
+ * When the kitchen bumped the ticket.
+ */
+completedAt: string | null, };

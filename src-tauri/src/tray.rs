@@ -137,6 +137,40 @@ mod tests {
     }
 
     #[test]
+    fn a_bumped_ticket_leaves_the_rail() {
+        let state = apply(
+            seed::initial_state(),
+            ActionKind::SeatGuest {
+                guest_id: "guest-maya".into(),
+                table_id: "t2".into(),
+            },
+            "a1",
+        );
+        let state = apply(
+            state,
+            ActionKind::AddOrderItem {
+                guest_id: "guest-maya".into(),
+                menu_item_id: "beet-salad".into(),
+            },
+            "a2",
+        );
+        let state = apply(
+            state,
+            ActionKind::SendOrder {
+                guest_id: "guest-maya".into(),
+            },
+            "a3",
+        );
+        assert!(summarise(&state).starts_with("🔥 1 ticket"));
+
+        let order_id = state.order_for_guest("guest-maya").unwrap().id.clone();
+        let state = apply(state, ActionKind::CompleteOrder { order_id }, "a4");
+
+        // Without this the count would only ever climb.
+        assert_eq!(summarise(&state), "");
+    }
+
+    #[test]
     fn a_draft_order_is_not_a_ticket() {
         // Seating opens a draft order. Nothing has been fired, so the pass is
         // still clear.

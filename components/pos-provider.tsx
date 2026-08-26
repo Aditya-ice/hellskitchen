@@ -105,6 +105,9 @@ interface PosContextValue {
   removeOrderItem: (guestId: string, menuItemId: string) => void;
   updateOrderNotes: (guestId: string, notes: string) => void;
   sendOrder: (guestId: string) => void;
+  /** Bumped from the pass. Addressed by order id — the kitchen works from
+   *  tickets, not from who is sitting where. */
+  completeOrder: (orderId: string) => void;
   resetDemo: () => void;
 }
 
@@ -284,6 +287,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     [dispatch],
   );
 
+  const completeOrder = useCallback(
+    (orderId: string) => dispatch(newAction({ type: "complete-order", orderId })),
+    [dispatch],
+  );
+
   const resetDemo = useCallback(() => {
     setSelectedGuestId(null);
     dispatch(newAction({ type: "reset" }));
@@ -321,6 +329,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       removeOrderItem,
       updateOrderNotes,
       sendOrder,
+      completeOrder,
       resetDemo,
     }),
     [
@@ -340,6 +349,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       removeOrderItem,
       updateOrderNotes,
       sendOrder,
+      completeOrder,
       resetDemo,
     ],
   );
