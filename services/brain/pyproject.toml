@@ -1,0 +1,28 @@
+[project]
+name = "ember-brain"
+version = "0.1.0"
+description = "Optional model services for Ember POS. The POS runs without it."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.116",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "uvicorn[standard]>=0.32",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# The package sits at the project root rather than under src/, so tests import
+# it from the working tree instead of whatever was last installed.
+pythonpath = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["brain"]

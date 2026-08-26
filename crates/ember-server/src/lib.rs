@@ -5,6 +5,7 @@
 //! tab, a phone on the LAN, and the native app all run identical code paths
 //! against one floor.
 
+pub mod brain;
 pub mod config;
 pub mod guard;
 pub mod sponsors;
@@ -92,6 +93,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/menu", get(menu))
         .route("/api/recommendations/{guest_id}", get(recommendations))
         .route("/api/summary", get(summary))
+        .route("/api/agent/ask", post(agent_ask))
         .route("/api/demo-session", post(demo_session))
         .route("/api/elevenlabs/token", get(elevenlabs_token))
         .route("/api/tavily/search", post(tavily_search))
@@ -295,6 +297,57 @@ async fn summary(State(state): State<Shared>) -> ApiResult<Json<FloorSummary>> {
             .count(),
         average_wait_minutes,
     }))
+}
+
+/// Asks the optional Python service a question about the live floor.
+///
+/// Guarded like the sponsor routes: an agent turn costs real money, so it needs
+/// a session and is rate limited. Always answers 200 — a missing or failing
+/// optional service is reported in the answer, not as an error.
+async fn agent_ask(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: Option<Json<AgentQuestion>>,
+) -> Response {
+    if let Err(rejection) = guard::require_same_origin(&headers) {
+        return rejection.into_response();
+    }
+    if let Err(rejection) = guard::require_demo_session(&headers) {
+        return rejection.into_response();
+    }
+    if let Err(rejection) = state
+        .limiter
+        .check(&headers, "agent-ask", 8, Duration::from_secs(60))
+    {
+        return rejection.into_response();
+    }
+
+    let Some(Json(query)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "A question is required." })),
+        )
+            .into_response();
+    };
+    let question = query.question.trim();
+    if question.is_empty() || question.len() > 2000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "A question is required." })),
+        )
+            .into_response();
+    }
+
+    let Some(base) = state.config.brain_url.as_deref() else {
+        return Json(brain::AgentAnswer::not_running()).into_response();
+    };
+
+    Json(brain::ask(&state.http, base, question).await).into_response()
+}
+
+#[derive(Deserialize)]
+struct AgentQuestion {
+    question: String,
 }
 
 // --- sponsor routes -------------------------------------------------------

@@ -117,6 +117,35 @@ export async function fetchSummary(signal?: AbortSignal): Promise<FloorSummary> 
   return readJson<FloorSummary>(response, "read the floor summary");
 }
 
+export interface AgentAnswer {
+  answer: string;
+  toolsUsed: string[];
+  model: string | null;
+  /** False when the service is absent, or running without model credentials. */
+  configured: boolean;
+}
+
+/**
+ * Asks the optional floor agent a question.
+ *
+ * Always resolves: `ember-server` reports a missing or failing agent as an
+ * answer rather than an error, because the POS does not depend on it.
+ */
+export async function askFloorAgent(
+  question: string,
+  signal?: AbortSignal,
+): Promise<AgentAnswer> {
+  await ensureDemoSession();
+  const response = await fetch(apiUrl("/api/agent/ask"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+    signal,
+  });
+  return readJson<AgentAnswer>(response, "ask the floor agent");
+}
+
 export async function postAction(action: Action): Promise<ActionOutcome> {
   const response = await fetch(apiUrl("/api/actions"), {
     method: "POST",

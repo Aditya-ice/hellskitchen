@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "dev:server": "cargo run -q -p ember-server",
+    "brain": "uv run --project services/brain uvicorn brain.app:app --host 127.0.0.1 --port 4100",
     "desktop": "cargo run -q -p ember-desktop",
     "build": "EMBER_EXPORT=1 next build",
     "build:server": "cargo build --release -p ember-server",

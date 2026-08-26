@@ -28,6 +28,7 @@ import {
 import type { GuestProfile, TableStatus } from "@/lib/domain";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
+import { FloorAgent } from "@/components/floor-agent";
 import { GuestTools } from "@/components/guest-tools";
 import { LarderPanel } from "@/components/larder-panel";
 import { useTodayLabel } from "@/lib/clock";
@@ -173,6 +174,7 @@ export function PosShell() {
                 <WifiOff className="size-3.5" /> Offline
               </span>
             )}
+            <FloorAgent />
             <GuestTools />
             <button
               type="button"

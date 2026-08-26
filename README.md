@@ -26,6 +26,7 @@ all see one floor.
 crates/ember-core     domain model, decision engine, state reducer (pure)
 crates/ember-store    SQLite: append-only action log + snapshot
 crates/ember-server   axum: REST + SSE + static bundle + sponsor proxies
+services/brain        optional Python service (floor agent). The POS runs without it.
 src-tauri/            macOS app: embeds the server, adds the native surfaces
 app/ components/ lib  Next.js UI — renders and dispatches, decides nothing
 lib/generated/        TypeScript types generated from the Rust structs
@@ -47,6 +48,33 @@ booking in a delivery at once add up instead of overwriting each other.
 
 Hard safety rules — allergens, dietary conflicts, unavailable stock — live in
 `ember-core` and gate every recommendation. Nothing downstream may reverse that.
+
+## Floor agent
+
+`services/brain` answers natural-language questions about the service happening
+right now — "who has been waiting longest?", "what can I sell that uses up the
+carrots?". Optional in the strongest sense: not running, running without
+credentials, and failing mid-answer all produce a readable answer rather than
+an error, and the POS behaves identically either way.
+
+```bash
+npm run brain    # http://127.0.0.1:4100, needs ANTHROPIC_API_KEY
+```
+
+Then point the server at it with `EMBER_BRAIN_URL=http://127.0.0.1:4100`, and
+the brain back at the server with `EMBER_URL`. Everything reaches it through
+`ember-server`, so the model credentials never go near the browser.
+
+The agent is read-only by construction — all five of its tools are queries, so
+it can advise but never seat a party, fire an order or move stock. Allergy and
+availability decisions arrive from `ember-core` already made: a blocked dish is
+shown to the model as BLOCKED with its reason, and the system prompt forbids
+working around one. `uv run --project services/brain python
+services/brain/tools_preview.py` prints exactly what the model is shown, against
+a live POS and without calling the model.
+
+Not yet wired to the desktop app: the brain needs a stable URL for the POS, and
+the desktop binds an ephemeral port. That is part of the sidecar packaging work.
 
 ## Setup
 
@@ -116,6 +144,8 @@ npm run lint
 npm run typecheck
 npm test          # UI client layer
 npm run test:rust # engine, reducer, store, server
+
+cd services/brain && uv run pytest   # floor agent
 ```
 
 `cargo test` also regenerates `lib/generated/` from the Rust types, so the two

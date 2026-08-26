@@ -266,6 +266,136 @@ async fn the_upstream_is_never_called_without_a_session() {
     );
 }
 
+// --- floor agent ---------------------------------------------------------
+
+fn ask_request(question: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/api/agent/ask")
+        .header("host", "localhost:4000")
+        .header("content-type", "application/json")
+        .header("cookie", SESSION)
+        .body(Body::from(json!({ "question": question }).to_string()))
+        .unwrap()
+}
+
+/// A stand-in for the Python service.
+async fn stub_brain() -> (String, Arc<Mutex<Vec<Recorded>>>) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let state = StubState {
+        recorded: recorded.clone(),
+        fail: false,
+    };
+    let app = Router::new().route("/ask", post(answer_question)).with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("http://{address}"), recorded)
+}
+
+async fn answer_question(
+    State(stub): State<StubState>,
+    request: Request<Body>,
+) -> axum::response::Response {
+    let path = request.uri().path().to_string();
+    let bytes = request
+        .into_body()
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .unwrap_or_default();
+
+    stub.recorded.lock().unwrap().push(Recorded {
+        path,
+        authorization: None,
+        xi_api_key: None,
+        body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    });
+
+    Json(json!({
+        "answer": "Priya Shah, 47 minutes.",
+        "tools_used": ["query_floor"],
+        "model": "claude-opus-5",
+        "configured": true
+    }))
+    .into_response()
+}
+
+fn app_with_brain(base: Option<&str>) -> axum::Router {
+    let config = Config {
+        brain_url: base.map(str::to_string),
+        ..Config::default()
+    };
+    ember_server::router(AppState::new(config).expect("in-memory store"))
+}
+
+#[tokio::test]
+async fn a_missing_brain_is_an_answer_not_an_error() {
+    // The POS works without it, so this must not look like a failure.
+    let app = app_with_brain(None);
+    let (status, body) = send(&app, ask_request("who is waiting?")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["configured"], false);
+    assert!(body["answer"].as_str().unwrap().contains("npm run brain"));
+}
+
+#[tokio::test]
+async fn an_unreachable_brain_degrades_to_an_answer() {
+    let app = app_with_brain(Some("http://127.0.0.1:1"));
+    let (status, body) = send(&app, ask_request("who is waiting?")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["answer"].as_str().unwrap().contains("POS is unaffected"));
+}
+
+#[tokio::test]
+async fn an_agent_answer_is_passed_through() {
+    let (base, recorded) = stub_brain().await;
+    let app = app_with_brain(Some(&base));
+
+    let (status, body) = send(&app, ask_request("who has waited longest?")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["answer"], "Priya Shah, 47 minutes.");
+    assert_eq!(body["toolsUsed"][0], "query_floor");
+    assert_eq!(body["configured"], true);
+
+    let calls = recorded.lock().unwrap();
+    assert_eq!(calls[0].path, "/ask");
+    assert_eq!(calls[0].body["question"], "who has waited longest?");
+}
+
+#[tokio::test]
+async fn the_agent_requires_a_session_and_a_question() {
+    let (base, recorded) = stub_brain().await;
+    let app = app_with_brain(Some(&base));
+
+    // No session cookie.
+    let anonymous = Request::builder()
+        .method("POST")
+        .uri("/api/agent/ask")
+        .header("host", "localhost:4000")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "question": "hello" }).to_string()))
+        .unwrap();
+    let (status, _) = send(&app, anonymous).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Empty question.
+    let (status, _) = send(&app, ask_request("   ")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "neither should have reached the brain"
+    );
+}
+
 #[tokio::test]
 async fn rate_limiting_stops_a_client_from_burning_sponsor_quota() {
     let (base, recorded) = stub_upstream(false).await;
