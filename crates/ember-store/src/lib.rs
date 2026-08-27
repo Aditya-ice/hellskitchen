@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use ember_core::{reduce, Action, PosState};
+use ember_core::{reduce, Action, PosState, Rejection};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +20,11 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("store mutex was poisoned")]
     Poisoned,
+    #[error(
+        "database is at schema version {found}, but this build only knows {known}; \
+         it was written by a newer version of Ember POS"
+    )]
+    FutureSchema { found: i64, known: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -48,14 +53,37 @@ pub struct LoggedAction {
 pub enum Applied {
     /// The action changed the state; here is the new revision.
     Changed(Revision),
-    /// A guard rejected the action, or it would not have changed anything.
-    Rejected,
+    /// A guard refused the action, and this is why. Distinct from `Unchanged`:
+    /// a refusal is something staff need told, a no-op is not.
+    Rejected(Rejection),
+    /// Allowed, but it would not have changed anything — re-saving identical
+    /// notes, for instance. Nothing to persist and nothing to report.
+    Unchanged,
     /// This action id was already applied. Re-submitting is a no-op, so that a
     /// retried request cannot seat a party or fire an order twice.
     Duplicate,
 }
 
-const SCHEMA: &str = r#"
+/// One schema migration. `sql` runs exactly once, in a transaction.
+struct Migration {
+    /// Named only so a failure says which step broke.
+    name: &'static str,
+    sql: &'static str,
+}
+
+/// Ordered schema migrations, oldest first.
+///
+/// The number applied is recorded in SQLite's `user_version`, so each one runs
+/// once per database. **Never edit or reorder a migration that has shipped** —
+/// append a new one instead, because databases in the field have already run
+/// the old text and will not run it again.
+///
+/// Migration 0 keeps `IF NOT EXISTS` deliberately: databases created before
+/// this runner existed already have these tables and a `user_version` of 0, so
+/// replaying it over them has to be a no-op rather than an error.
+const MIGRATIONS: &[Migration] = &[Migration {
+    name: "initial schema",
+    sql: r#"
 CREATE TABLE IF NOT EXISTS actions (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
     id      TEXT NOT NULL UNIQUE,
@@ -71,7 +99,8 @@ CREATE TABLE IF NOT EXISTS snapshot (
     version INTEGER NOT NULL,
     state   TEXT NOT NULL
 );
-"#;
+"#,
+}];
 
 pub struct Store {
     connection: Mutex<rusqlite::Connection>,
@@ -87,17 +116,59 @@ impl Store {
         Self::from_connection(rusqlite::Connection::open_in_memory()?)
     }
 
-    fn from_connection(connection: rusqlite::Connection) -> Result<Self> {
+    fn from_connection(mut connection: rusqlite::Connection) -> Result<Self> {
         // WAL keeps a reader (the SSE snapshot fetch) from blocking a writer.
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.execute_batch(SCHEMA)?;
+        Self::migrate(&mut connection)?;
 
         let store = Self {
             connection: Mutex::new(connection),
         };
         store.seed_if_empty()?;
         Ok(store)
+    }
+
+    /// Bring a database up to the current schema.
+    ///
+    /// Each pending migration runs in its own transaction and bumps
+    /// `user_version` in the same transaction, so an interrupted upgrade leaves
+    /// the database at the last version that fully applied rather than
+    /// half-migrated.
+    fn migrate(connection: &mut rusqlite::Connection) -> Result<()> {
+        let applied: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let known = MIGRATIONS.len() as i64;
+
+        // A database written by a newer build may have columns and constraints
+        // this binary does not understand. Refusing to open it is the only safe
+        // answer: writing to it would silently corrupt the newer shape.
+        if applied > known {
+            return Err(StoreError::FutureSchema {
+                found: applied,
+                known,
+            });
+        }
+
+        for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied as usize) {
+            let transaction = connection.transaction()?;
+            transaction.execute_batch(migration.sql).map_err(|error| {
+                eprintln!(
+                    "ember-store: migration {:?} failed: {error}",
+                    migration.name
+                );
+                error
+            })?;
+            transaction.pragma_update(None, "user_version", index as i64 + 1)?;
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+
+    /// The schema version this database is at. Surfaced by the health endpoint
+    /// so a deployment can tell whether a migration actually landed.
+    pub fn schema_version(&self) -> Result<i64> {
+        let connection = self.lock()?;
+        Ok(connection.pragma_query_value(None, "user_version", |row| row.get(0))?)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>> {
@@ -151,8 +222,10 @@ impl Store {
         }
 
         let current = Self::read_revision(&transaction)?;
-        let Some(next_state) = reduce(&current.state, action) else {
-            return Ok(Applied::Rejected);
+        let next_state = match reduce(&current.state, action) {
+            Ok(Some(next)) => next,
+            Ok(None) => return Ok(Applied::Unchanged),
+            Err(reason) => return Ok(Applied::Rejected(reason)),
         };
         let version = current.version + 1;
 
@@ -181,9 +254,8 @@ impl Store {
     /// ranking services in `services/brain` will train on.
     pub fn actions(&self, since_seq: i64, limit: i64) -> Result<Vec<LoggedAction>> {
         let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT seq, payload FROM actions WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
-        )?;
+        let mut statement = connection
+            .prepare("SELECT seq, payload FROM actions WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2")?;
         let rows = statement.query_map((since_seq, limit), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -263,12 +335,43 @@ mod tests {
     }
 
     #[test]
+    fn an_allowed_no_op_is_not_reported_as_a_refusal() {
+        let store = Store::in_memory().unwrap();
+        let existing = store
+            .revision()
+            .unwrap()
+            .state
+            .guest("guest-maya")
+            .unwrap()
+            .notes
+            .clone();
+
+        // Re-saving the notes that are already there is not an error, and must
+        // not be shown to staff as one.
+        assert_eq!(
+            store
+                .apply(&action(
+                    "a1",
+                    ActionKind::UpdateGuestNotes {
+                        guest_id: "guest-maya".into(),
+                        notes: existing,
+                    }
+                ))
+                .unwrap(),
+            Applied::Unchanged
+        );
+        assert_eq!(store.revision().unwrap().version, 0);
+        assert_eq!(store.action_count().unwrap(), 0);
+    }
+
+    #[test]
     fn a_rejected_action_changes_nothing_and_is_not_logged() {
         let store = Store::in_memory().unwrap();
         // Jordan is "expected", not checked in — seating must be refused.
         assert_eq!(
             store.apply(&seat("a1", "guest-jordan", "t7")).unwrap(),
-            Applied::Rejected
+            Applied::Rejected(Rejection::GuestNotReadyToSeat),
+            "the store must carry the reason back, not just the refusal"
         );
 
         assert_eq!(store.revision().unwrap().version, 0);
@@ -294,12 +397,107 @@ mod tests {
         assert_eq!(store.action_count().unwrap(), 1);
     }
 
-    #[test]
-    fn state_survives_reopening_the_database() {
+    /// A database path nothing else is using.
+    ///
+    /// The `-wal` and `-shm` sidecars have to go too: SQLite replays a leftover
+    /// write-ahead log into what looks like a fresh file, so removing only the
+    /// database leaves the previous run's committed actions behind and makes
+    /// these tests flaky.
+    fn temp_database(name: &str) -> std::path::PathBuf {
         let directory = std::env::temp_dir().join(format!("ember-store-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("ember.db");
-        let _ = std::fs::remove_file(&path);
+        let path = directory.join(format!("{name}.db"));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        path
+    }
+
+    #[test]
+    fn a_fresh_database_is_at_the_current_schema_version() {
+        let store = Store::in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn reopening_does_not_re_run_migrations() {
+        let path = temp_database("migrate-idempotent");
+        let first = Store::open(&path).unwrap();
+        changed(first.apply(&seat("a1", "guest-maya", "t2")).unwrap());
+        let version = first.schema_version().unwrap();
+        drop(first);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), version);
+        // A re-run of migration 0 would have been harmless, but a re-run of a
+        // future data migration would not: the guard is that it never runs.
+        assert_eq!(reopened.action_count().unwrap(), 1);
+        assert_eq!(reopened.revision().unwrap().version, 1);
+    }
+
+    #[test]
+    fn a_database_from_before_the_migration_runner_upgrades_in_place() {
+        // Databases in the field were provisioned by a bare `execute_batch` and
+        // so sit at user_version 0 with the tables already present. Opening one
+        // must adopt it, not fail on "table already exists" and not re-seed
+        // over the service it holds.
+        let path = temp_database("migrate-legacy");
+        {
+            let legacy = rusqlite::Connection::open(&path).unwrap();
+            legacy.execute_batch(MIGRATIONS[0].sql).unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO snapshot (id, version, state) VALUES (1, 7, ?1)",
+                    [serde_json::to_string(&ember_core::seed::initial_state()).unwrap()],
+                )
+                .unwrap();
+            assert_eq!(
+                legacy
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "the fixture must look like a pre-runner database"
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store.revision().unwrap().version,
+            7,
+            "the existing service must survive the upgrade"
+        );
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused() {
+        let path = temp_database("migrate-future");
+        {
+            let store = Store::open(&path).unwrap();
+            changed(store.apply(&seat("a1", "guest-maya", "t2")).unwrap());
+        }
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "user_version", 999_i64)
+                .unwrap();
+        }
+
+        // Opening it read-write would write today's shape over a schema this
+        // build cannot see, so it has to fail loudly instead.
+        match Store::open(&path) {
+            Err(StoreError::FutureSchema { found, known }) => {
+                assert_eq!(found, 999);
+                assert_eq!(known, MIGRATIONS.len() as i64);
+            }
+            Ok(_) => panic!("expected opening a newer database to be refused"),
+            Err(other) => panic!("expected a FutureSchema error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_survives_reopening_the_database() {
+        let path = temp_database("restart");
 
         {
             let store = Store::open(&path).unwrap();
@@ -321,16 +519,28 @@ mod tests {
         let revision = reopened.revision().unwrap();
         assert_eq!(revision.version, 2, "version must survive a restart");
         assert_eq!(
-            revision.state.table("t2").unwrap().seated_guest_id.as_deref(),
+            revision
+                .state
+                .table("t2")
+                .unwrap()
+                .seated_guest_id
+                .as_deref(),
             Some("guest-maya")
         );
         assert_eq!(
-            revision.state.order_for_guest("guest-maya").unwrap().lines.len(),
+            revision
+                .state
+                .order_for_guest("guest-maya")
+                .unwrap()
+                .lines
+                .len(),
             1
         );
         assert_eq!(reopened.action_count().unwrap(), 2);
-
-        std::fs::remove_dir_all(&directory).ok();
+        // Deliberately no remove_dir_all here: the directory is shared by every
+        // test in this binary, and tearing it down raced the other on-disk
+        // tests into using a database that had just been deleted underneath
+        // them. `temp_database` clears its own files on the way in instead.
     }
 
     #[test]
