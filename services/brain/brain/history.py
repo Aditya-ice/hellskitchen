@@ -12,9 +12,10 @@ and the reranker sit on top of.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -24,7 +25,7 @@ def parse_time(value: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class History:
         """
         if self.first_at is None:
             return timedelta(0)
-        end = now or datetime.now(timezone.utc)
+        end = now or datetime.now(UTC)
         return max(end - self.first_at, timedelta(0))
 
     def dishes_ordered(self) -> dict[str, int]:

@@ -1,6 +1,6 @@
 """The formatters are what the model reads, so they are what these test."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from brain.floor import (
     Floor,
@@ -86,7 +86,14 @@ def floor(orders: list | None = None) -> Floor:
         if orders is None
         else orders,
         "ingredients": [
-            {"id": "carrot", "name": "Carrots", "onHand": 0, "par": 18, "unit": "lb", "aliases": []},
+            {
+                "id": "carrot",
+                "name": "Carrots",
+                "onHand": 0,
+                "par": 18,
+                "unit": "lb",
+                "aliases": [],
+            },
             {
                 "id": "beet",
                 "name": "Golden beets",
@@ -202,7 +209,7 @@ class TestDescribeStock:
 
 class TestDescribeTickets:
     def test_reports_age_from_when_the_ticket_was_fired(self):
-        text = describe_tickets(floor(), datetime(2026, 8, 26, 18, 34, tzinfo=timezone.utc))
+        text = describe_tickets(floor(), datetime(2026, 8, 26, 18, 34, tzinfo=UTC))
         assert "24 min old" in text
         assert "T2 (Maya Chen)" in text
 

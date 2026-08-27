@@ -5,11 +5,11 @@ that the reconstruction is exact — a forecaster fed the wrong lines is worse
 than no forecaster.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from brain.history import History, replay
 
-T0 = datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 26, 18, 0, tzinfo=UTC)
 
 
 def entry(kind: str, minutes: int = 0, **fields):
@@ -78,9 +78,7 @@ class TestReplayingTickets:
         assert dict(history.fires[1].lines) == {"ember-steak": 1}
 
     def test_a_second_ticket_does_not_inherit_the_first(self):
-        history = replay(
-            [add("beet-salad", 1), fire(2), add("ember-steak", 3), fire(4)]
-        )
+        history = replay([add("beet-salad", 1), fire(2), add("ember-steak", 3), fire(4)])
         assert dict(history.fires[0].lines) == {"beet-salad": 1}
         assert dict(history.fires[1].lines) == {"ember-steak": 1}
 
@@ -121,7 +119,11 @@ class TestOtherEvents:
 
     def test_ignores_events_it_has_no_use_for(self):
         history = replay(
-            [entry("update-guest-notes", 1, guestId="guest-maya", notes="hi"), add("beet-salad", 2), fire(3)]
+            [
+                entry("update-guest-notes", 1, guestId="guest-maya", notes="hi"),
+                add("beet-salad", 2),
+                fire(3),
+            ]
         )
         assert len(history.fires) == 1
 
