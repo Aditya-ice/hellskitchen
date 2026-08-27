@@ -17,6 +17,22 @@ use tower_http::services::ServeDir;
 use crate::AppState;
 
 pub async fn serve(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let path = request.uri().path().trim_start_matches('/').to_string();
+
+    // An unmatched /api/* path is a client calling an endpoint that does not
+    // exist. Without this it falls through to the index.html candidate below
+    // and comes back as 200 HTML, so a typo in a URL looks like a successful
+    // request that returned an unparseable body.
+    if path == "api" || path.starts_with("api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": format!("No such endpoint: /{path}"),
+            })),
+        )
+            .into_response();
+    }
+
     let Some(directory) = state.config.static_dir.clone() else {
         return (
             StatusCode::NOT_FOUND,
@@ -26,8 +42,6 @@ pub async fn serve(State(state): State<Arc<AppState>>, request: Request<Body>) -
         )
             .into_response();
     };
-
-    let path = request.uri().path().trim_start_matches('/').to_string();
 
     // `/pos` → pos.html → pos/index.html; `/` → index.html. A miss falls back
     // to index.html so client-side routes still boot.

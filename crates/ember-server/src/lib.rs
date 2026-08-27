@@ -20,7 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ember_core::{engine, seed, Action, Recommendation};
+use ember_core::{engine, seed, Action, Recommendation, Rejection};
 use ember_store::{Applied, Revision, Store};
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -131,7 +131,14 @@ type ApiResult<T> = Result<T, ApiError>;
 #[serde(rename_all = "camelCase")]
 struct Health {
     ok: bool,
-    version: i64,
+    /// The build serving this, so a deployment can tell which binary answered.
+    build: &'static str,
+    /// Revision of the floor: how many actions have changed the state. Not a
+    /// build number — `build` is that.
+    revision: i64,
+    /// Which schema migration the database is at. An upgrade that failed to run
+    /// shows up here rather than as a confusing error later.
+    schema_version: i64,
     actions_logged: i64,
     /// Whether each optional integration is configured. The UI uses this to
     /// decide between live and fallback affordances instead of guessing.
@@ -143,7 +150,9 @@ struct Health {
 async fn health(State(state): State<Shared>) -> ApiResult<Json<Health>> {
     Ok(Json(Health {
         ok: true,
-        version: state.store.revision()?.version,
+        build: env!("CARGO_PKG_VERSION"),
+        revision: state.store.revision()?.version,
+        schema_version: state.store.schema_version()?,
         actions_logged: state.store.action_count()?,
         elevenlabs: state.config.elevenlabs_key.is_some(),
         tavily: state.config.tavily_key.is_some(),
@@ -158,8 +167,19 @@ async fn state_handler(State(state): State<Shared>) -> ApiResult<Json<Revision>>
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionOutcome {
-    /// "changed", "rejected", or "duplicate".
+    /// "changed", "unchanged", "rejected", or "duplicate".
+    ///
+    /// Deliberately not an HTTP status: a refused action is a normal outcome of
+    /// a busy service, not a transport failure, and the revision below is the
+    /// caller's authoritative view either way.
     outcome: &'static str,
+    /// Present only when `outcome` is "rejected". The tag is what a client
+    /// switches on; `reasonMessage` is the fallback for one that has not
+    /// mapped this variant yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Rejection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_message: Option<&'static str>,
     #[serde(flatten)]
     revision: Revision,
 }
@@ -170,13 +190,19 @@ async fn actions(
 ) -> ApiResult<Json<ActionOutcome>> {
     let applied = state.apply(&action)?;
 
-    let (outcome, revision) = match applied {
-        Applied::Changed(revision) => ("changed", revision),
-        Applied::Rejected => ("rejected", state.store.revision()?),
-        Applied::Duplicate => ("duplicate", state.store.revision()?),
+    let (outcome, reason, revision) = match applied {
+        Applied::Changed(revision) => ("changed", None, revision),
+        Applied::Unchanged => ("unchanged", None, state.store.revision()?),
+        Applied::Rejected(reason) => ("rejected", Some(reason), state.store.revision()?),
+        Applied::Duplicate => ("duplicate", None, state.store.revision()?),
     };
 
-    Ok(Json(ActionOutcome { outcome, revision }))
+    Ok(Json(ActionOutcome {
+        outcome,
+        reason,
+        reason_message: reason.map(Rejection::message),
+        revision,
+    }))
 }
 
 /// Server-sent events: the current revision on connect, then every change.
@@ -248,7 +274,10 @@ async fn recommendations(
 ) -> ApiResult<Json<RecommendationPayload>> {
     let revision = state.store.revision()?;
     let guest = revision.state.guest(&guest_id).ok_or_else(|| {
-        ApiError(StatusCode::NOT_FOUND, format!("No guest with id {guest_id}."))
+        ApiError(
+            StatusCode::NOT_FOUND,
+            format!("No guest with id {guest_id}."),
+        )
     })?;
 
     let menu_items = seed::menu_items();
@@ -269,7 +298,11 @@ async fn recommendations(
                 // put it in front of a server.
                 if preserves_eligibility(&dishes, &ranking.dishes) {
                     dishes = ranking.dishes;
-                    ranked_by = if ranking.ranked_by == "model" { "model" } else { "engine" };
+                    ranked_by = if ranking.ranked_by == "model" {
+                        "model"
+                    } else {
+                        "engine"
+                    };
                 } else {
                     eprintln!("floor reranker changed dish eligibility; ignoring its ranking");
                 }
@@ -507,7 +540,9 @@ async fn elevenlabs_token(State(state): State<Shared>, headers: HeaderMap) -> Re
     };
 
     match sponsors::elevenlabs_token(&state.http, &state.config.elevenlabs_base, api_key).await {
-        Ok(token) => Json(serde_json::json!({ "token": token, "configured": true })).into_response(),
+        Ok(token) => {
+            Json(serde_json::json!({ "token": token, "configured": true })).into_response()
+        }
         Err(error) => {
             eprintln!("unable to create ElevenLabs token: {error}");
             (
@@ -574,7 +609,8 @@ async fn tavily_search(
         return Json(sponsors::fallback_context()).into_response();
     };
 
-    Json(sponsors::tavily_context(&state.http, &state.config.tavily_base, api_key, dish).await).into_response()
+    Json(sponsors::tavily_context(&state.http, &state.config.tavily_base, api_key, dish).await)
+        .into_response()
 }
 
 /// Binds the configured address and serves until the process is asked to stop.

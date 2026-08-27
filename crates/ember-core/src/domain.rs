@@ -17,6 +17,76 @@ pub fn format_amount(value: f64) -> String {
     }
 }
 
+/// Why the reducer refused an action.
+///
+/// The tag is the contract: a client switches on it to decide what to say and
+/// whether to offer a way out, so these are stable identifiers rather than
+/// prose. `message` is the fallback for a surface that has not mapped a variant
+/// yet — it is not the primary interface, and it is not localised.
+///
+/// A refusal is not an error. Two hosts racing for the same table is ordinary
+/// during a service; what is not acceptable is the second one seeing nothing
+/// happen with no explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum Rejection {
+    /// No guest with that id. Usually a stale client.
+    UnknownGuest,
+    UnknownTable,
+    UnknownOrder,
+    UnknownIngredient,
+    UnknownMenuItem,
+    /// Check-in only applies to a party that has not arrived yet.
+    GuestNotExpected,
+    /// A walk-in id that is already on the floor.
+    GuestAlreadyPresent,
+    /// The party is already sitting there.
+    AlreadyAtThatTable,
+    /// The party has not checked in, so there is nobody to seat.
+    GuestNotReadyToSeat,
+    /// Somebody else is sitting there, or it has not been cleared.
+    TableUnavailable,
+    TableTooSmall,
+    /// The party needs step-free access and this table has none.
+    TableNotAccessible,
+    /// No draft order to edit. Either nothing is open, or it is already fired.
+    NoOpenOrder,
+    /// The ticket is with the kitchen and cannot be edited.
+    OrderLocked,
+    /// Firing an empty ticket.
+    OrderEmpty,
+    /// Only a ticket that reached the kitchen can be bumped.
+    TicketNotSent,
+    /// A restock that is not a positive, finite number.
+    InvalidQuantity,
+}
+
+impl Rejection {
+    /// Plain-language fallback, safe to show a member of staff mid-service.
+    pub fn message(self) -> &'static str {
+        match self {
+            Rejection::UnknownGuest => "That guest is no longer on the floor.",
+            Rejection::UnknownTable => "That table is no longer on the floor plan.",
+            Rejection::UnknownOrder => "That ticket no longer exists.",
+            Rejection::UnknownIngredient => "That ingredient is not in the larder.",
+            Rejection::UnknownMenuItem => "That dish is not on the menu.",
+            Rejection::GuestNotExpected => "That party has already checked in.",
+            Rejection::GuestAlreadyPresent => "That party is already on the floor.",
+            Rejection::AlreadyAtThatTable => "That party is already at that table.",
+            Rejection::GuestNotReadyToSeat => "Check the party in before seating them.",
+            Rejection::TableUnavailable => "That table is taken.",
+            Rejection::TableTooSmall => "That table is too small for the party.",
+            Rejection::TableNotAccessible => "That party needs an accessible table.",
+            Rejection::NoOpenOrder => "There is no open order for that party.",
+            Rejection::OrderLocked => "That ticket is with the kitchen and cannot be changed.",
+            Rejection::OrderEmpty => "Add something to the order before sending it.",
+            Rejection::TicketNotSent => "That ticket has not been fired yet.",
+            Rejection::InvalidQuantity => "Enter a quantity greater than zero.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]

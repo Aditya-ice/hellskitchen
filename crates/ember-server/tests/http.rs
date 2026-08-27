@@ -106,6 +106,64 @@ async fn a_guarded_action_is_reported_as_rejected() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["outcome"], "rejected");
     assert_eq!(body["version"], 0);
+    // The reason is the point: without it the client can only say "nothing
+    // happened", which is indistinguishable from a dropped request.
+    assert_eq!(body["reason"], "guest-not-ready-to-seat");
+    assert!(
+        body["reasonMessage"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "a refusal must carry text a surface can show without mapping the tag"
+    );
+}
+
+#[tokio::test]
+async fn an_allowed_no_op_is_not_reported_as_a_rejection() {
+    let app = app();
+    // Seat Maya, then seat her at the same table again. The second is not a
+    // refusal in the sense that matters -- but it is also not silence.
+    let (_, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    let (status, body) = send(&app, post("/api/actions", seat("a2", "guest-maya", "t2"))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "rejected");
+    assert_eq!(body["reason"], "already-at-that-table");
+}
+
+#[tokio::test]
+async fn a_change_that_alters_nothing_reports_unchanged() {
+    let app = app();
+    // Read the note that is already there rather than hard-coding it, so this
+    // keeps testing the no-op path even when the seed copy changes.
+    let (_, state) = send(&app, get("/api/state")).await;
+    let existing = state["state"]["guests"]
+        .as_array()
+        .and_then(|guests| guests.iter().find(|guest| guest["id"] == "guest-maya"))
+        .and_then(|guest| guest["notes"].as_str())
+        .expect("the seeded floor has Maya with notes")
+        .to_string();
+
+    let (status, body) = send(
+        &app,
+        post(
+            "/api/actions",
+            json!({
+                "id": "a1",
+                "at": "2026-08-13T10:00:00.000Z",
+                "type": "update-guest-notes",
+                "guestId": "guest-maya",
+                "notes": existing,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "unchanged");
+    assert!(
+        body["reason"].is_null(),
+        "a no-op carries no reason, because there is nothing to explain"
+    );
 }
 
 #[tokio::test]
@@ -202,6 +260,23 @@ async fn an_absurd_log_limit_is_clamped_rather_than_honoured() {
 }
 
 #[tokio::test]
+async fn an_unknown_api_path_is_a_json_404() {
+    let app = app();
+    let (status, body) = send(&app, get("/api/typo")).await;
+
+    // The static handler is the router's fallback, and its last candidate is
+    // index.html. Without an explicit guard this returned 200 HTML, so a
+    // mistyped endpoint looked like a success with a body no client could read.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("/api/typo")),
+        "the 404 should name the path that missed, got {body:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_guest_is_a_404() {
     let app = app();
     let (status, _) = send(&app, get("/api/recommendations/nobody")).await;
@@ -282,7 +357,10 @@ async fn firing_tickets_depletes_stock_and_takes_the_dish_off_the_menu() {
         &app,
         post(
             "/api/actions",
-            step("a5", json!({ "type": "send-order", "guestId": "guest-maya" })),
+            step(
+                "a5",
+                json!({ "type": "send-order", "guestId": "guest-maya" }),
+            ),
         ),
     )
     .await;
@@ -322,6 +400,16 @@ async fn health_reports_which_integrations_are_configured() {
     assert_eq!(body["elevenlabs"], false);
     assert_eq!(body["tavily"], false);
     assert_eq!(body["actionsLogged"], 0);
+    assert_eq!(body["revision"], 0);
+    // A database that failed to migrate is the kind of thing a health check
+    // exists to catch, so the schema version is part of the contract.
+    assert_eq!(body["schemaVersion"], 1);
+    assert!(
+        body["build"]
+            .as_str()
+            .is_some_and(|build| !build.is_empty()),
+        "health must name the build serving it"
+    );
 }
 
 // --- sponsor guards over HTTP ---------------------------------------------
@@ -358,7 +446,11 @@ async fn sponsor_routes_require_a_demo_session() {
     let (status, _) = send(&app, get("/api/elevenlabs/token")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (status, _) = send(&app, post("/api/tavily/search", json!({ "dishId": "beet-salad" }))).await;
+    let (status, _) = send(
+        &app,
+        post("/api/tavily/search", json!({ "dishId": "beet-salad" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -468,9 +560,7 @@ async fn the_event_stream_opens_with_the_current_state_and_then_pushes_changes()
     assert!(pushed.contains("guest-maya"), "{pushed}");
 }
 
-async fn next_event(
-    stream: &mut axum::body::BodyDataStream,
-) -> String {
+async fn next_event(stream: &mut axum::body::BodyDataStream) -> String {
     use futures::StreamExt;
 
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
@@ -489,9 +579,10 @@ async fn a_full_service_runs_from_arrival_to_sent_order() {
 
     let step = |id: &str, kind: Value| {
         let mut action = json!({ "id": id, "at": "2026-08-13T10:00:00.000Z" });
-        action.as_object_mut().unwrap().extend(
-            kind.as_object().unwrap().clone(),
-        );
+        action
+            .as_object_mut()
+            .unwrap()
+            .extend(kind.as_object().unwrap().clone());
         action
     };
 
@@ -500,7 +591,10 @@ async fn a_full_service_runs_from_arrival_to_sent_order() {
         &app,
         post(
             "/api/actions",
-            step("a1", json!({ "type": "check-in", "guestId": "guest-jordan" })),
+            step(
+                "a1",
+                json!({ "type": "check-in", "guestId": "guest-jordan" }),
+            ),
         ),
     )
     .await;
@@ -526,7 +620,10 @@ async fn a_full_service_runs_from_arrival_to_sent_order() {
         &app,
         post(
             "/api/actions",
-            step("a4", json!({ "type": "send-order", "guestId": "guest-jordan" })),
+            step(
+                "a4",
+                json!({ "type": "send-order", "guestId": "guest-jordan" }),
+            ),
         ),
     )
     .await;

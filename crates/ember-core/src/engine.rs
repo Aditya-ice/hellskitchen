@@ -25,21 +25,38 @@ fn clamp_score(score: f64) -> f64 {
     score.round().clamp(0.0, 100.0)
 }
 
-pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
+/// Why this party cannot sit at this table, or `None` when they can.
+///
+/// The order of the checks is the order a host would think in, so the reason
+/// they are told is the most useful one rather than whichever test happened to
+/// run first.
+pub fn seating_obstacle(guest: &GuestProfile, table: &Table) -> Option<Rejection> {
     let may_be_seated = matches!(
         guest.status,
         GuestStatus::Waiting | GuestStatus::Seated | GuestStatus::Ordered
     );
+    if !may_be_seated {
+        return Some(Rejection::GuestNotReadyToSeat);
+    }
+    if table.status != TableStatus::Available || table.seated_guest_id.is_some() {
+        return Some(Rejection::TableUnavailable);
+    }
+    if table.capacity < guest.party_size {
+        return Some(Rejection::TableTooSmall);
+    }
+
     let needs_accessible = guest
         .seating_preferences
         .iter()
         .any(|preference| preference == "accessible");
+    if needs_accessible && !table.accessible {
+        return Some(Rejection::TableNotAccessible);
+    }
+    None
+}
 
-    may_be_seated
-        && table.status == TableStatus::Available
-        && table.seated_guest_id.is_none()
-        && table.capacity >= guest.party_size
-        && (!needs_accessible || table.accessible)
+pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
+    seating_obstacle(guest, table).is_none()
 }
 
 pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommendation> {
@@ -139,9 +156,11 @@ pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommend
 
     // Stable sort, matching JS: eligible first, then score descending.
     recommendations.sort_by(|a, b| {
-        b.eligible
-            .cmp(&a.eligible)
-            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     recommendations
 }
@@ -167,8 +186,11 @@ pub fn recommend_dishes(
             let mut reasons: Vec<String> = Vec::new();
             let mut warnings: Vec<String> = Vec::new();
 
-            let normalized_allergens: Vec<String> =
-                item.allergens.iter().map(|value| normalize(value)).collect();
+            let normalized_allergens: Vec<String> = item
+                .allergens
+                .iter()
+                .map(|value| normalize(value))
+                .collect();
             let allergy_matches: Vec<&String> = guest
                 .allergies
                 .iter()
@@ -215,13 +237,8 @@ pub fn recommend_dishes(
             let mut score = item.popularity * 0.42 + item.margin_score * 0.22;
             score += (22.0 - item.prep_minutes).max(0.0) * 0.65;
 
-            let search_text = format!(
-                "{} {} {}",
-                item.name,
-                item.description,
-                item.tags.join(" ")
-            )
-            .to_lowercase();
+            let search_text = format!("{} {} {}", item.name, item.description, item.tags.join(" "))
+                .to_lowercase();
 
             let matched_likes: Vec<&String> = guest
                 .likes
@@ -286,9 +303,11 @@ pub fn recommend_dishes(
         .collect();
 
     recommendations.sort_by(|a, b| {
-        b.eligible
-            .cmp(&a.eligible)
-            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     recommendations
 }
@@ -385,8 +404,11 @@ mod tests {
 
     #[test]
     fn blocks_explicit_allergens_and_unmet_dietary_requirements() {
-        let recommendations =
-            recommend_dishes(&guest("guest-maya"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         let tartare = find(&recommendations, "carrot-tartare");
         assert!(!tartare.eligible);
@@ -403,8 +425,11 @@ mod tests {
 
     #[test]
     fn keeps_only_vegan_compatible_dishes_eligible_for_a_vegan_guest() {
-        let recommendations =
-            recommend_dishes(&guest("guest-jordan"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-jordan"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         assert!(find(&recommendations, "cauliflower").eligible);
         assert!(!find(&recommendations, "herb-chicken").eligible);
@@ -412,11 +437,18 @@ mod tests {
 
     #[test]
     fn ineligible_dishes_always_score_zero() {
-        let recommendations =
-            recommend_dishes(&guest("guest-maya"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         for recommendation in recommendations.iter().filter(|item| !item.eligible) {
-            assert_eq!(recommendation.score, 0.0, "{} scored above zero", recommendation.id);
+            assert_eq!(
+                recommendation.score, 0.0,
+                "{} scored above zero",
+                recommendation.id
+            );
         }
     }
 

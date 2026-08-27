@@ -14,6 +14,7 @@ import type { GuestProfile } from "@/lib/generated/GuestProfile";
 import type { MenuItem } from "@/lib/generated/MenuItem";
 import type { PosState } from "@/lib/generated/PosState";
 import type { Recommendation } from "@/lib/generated/Recommendation";
+import type { Rejection } from "@/lib/generated/Rejection";
 import type { Restaurant } from "@/lib/generated/Restaurant";
 import type { StaffMember } from "@/lib/generated/StaffMember";
 
@@ -100,7 +101,16 @@ export interface FloorSummary {
 }
 
 export interface ActionOutcome extends Revision {
-  outcome: "changed" | "rejected" | "duplicate";
+  /**
+   * `changed` moved the floor. `unchanged` was allowed but altered nothing.
+   * `duplicate` was already applied — a retry, not a second seating.
+   * `rejected` was refused by a guard, and `reason` says which.
+   */
+  outcome: "changed" | "unchanged" | "rejected" | "duplicate";
+  /** Set only when `outcome` is `rejected`. Switch on this, not the message. */
+  reason?: Rejection;
+  /** Server-supplied fallback text, for a reason this client has no copy for. */
+  reasonMessage?: string;
 }
 
 async function readJson<T>(response: Response, what: string): Promise<T> {
