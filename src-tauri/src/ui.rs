@@ -97,7 +97,11 @@ impl Seen {
     fn diff(&mut self, state: &PosState) -> Vec<Message> {
         let mut messages = Vec::new();
 
-        for order in state.orders.iter().filter(|o| o.status == OrderStatus::Sent) {
+        for order in state
+            .orders
+            .iter()
+            .filter(|o| o.status == OrderStatus::Sent)
+        {
             if self.sent_orders.insert(order.id.clone()) {
                 let guest = state
                     .guest(&order.guest_id)
@@ -123,9 +127,11 @@ impl Seen {
         // A party with recorded allergies has just been seated. The landing
         // page promises allergies are surfaced early; this is what makes that
         // true when the window is behind something else.
-        for guest in state.guests.iter().filter(|guest| {
-            matches!(guest.status, GuestStatus::Seated | GuestStatus::Ordered)
-        }) {
+        for guest in state
+            .guests
+            .iter()
+            .filter(|guest| matches!(guest.status, GuestStatus::Seated | GuestStatus::Ordered))
+        {
             if self.seated_guests.insert(guest.id.clone()) && !guest.allergies.is_empty() {
                 let table = state
                     .table_seating(&guest.id)
@@ -177,7 +183,8 @@ mod tests {
                 kind,
             },
         )
-        .expect("action applied")
+        .expect("the action should be allowed")
+        .expect("the action should change the floor")
     }
 
     fn seat(state: PosState, guest: &str, table: &str, id: &str) -> PosState {
@@ -202,7 +209,11 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].title, "Allergy — Maya Chen");
-        assert!(messages[0].body.contains("tree nuts"), "{}", messages[0].body);
+        assert!(
+            messages[0].body.contains("tree nuts"),
+            "{}",
+            messages[0].body
+        );
         assert!(messages[0].body.contains("T2"), "{}", messages[0].body);
     }
 
@@ -273,7 +284,11 @@ mod tests {
         let messages = seen.diff(&state);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].title, "Order sent");
-        assert!(messages[0].body.contains("Maya Chen"), "{}", messages[0].body);
+        assert!(
+            messages[0].body.contains("Maya Chen"),
+            "{}",
+            messages[0].body
+        );
         assert!(messages[0].body.contains("T2"), "{}", messages[0].body);
         assert!(messages[0].body.contains("1 item"), "{}", messages[0].body);
     }

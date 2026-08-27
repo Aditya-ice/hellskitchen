@@ -28,7 +28,14 @@ pub fn restaurant() -> Restaurant {
     }
 }
 
-fn ingredient(id: &str, name: &str, aliases: &[&str], on_hand: f64, par: f64, unit: &str) -> Ingredient {
+fn ingredient(
+    id: &str,
+    name: &str,
+    aliases: &[&str],
+    on_hand: f64,
+    par: f64,
+    unit: &str,
+) -> Ingredient {
     Ingredient {
         id: id.into(),
         name: name.into(),
@@ -43,15 +50,71 @@ pub fn ingredients() -> Vec<Ingredient> {
     vec![
         ingredient("carrot", "Carrots", &["carrot", "carrots"], 3.0, 18.0, "lb"),
         ingredient("beet", "Golden beets", &["beet", "beets"], 16.0, 12.0, "lb"),
-        ingredient("parsnip", "Parsnips", &["parsnip", "parsnips"], 14.0, 10.0, "lb"),
-        ingredient("salmon", "Salmon", &["salmon", "fish"], 24.0, 30.0, "portions"),
-        ingredient("chicken", "Chicken", &["chicken", "poultry"], 38.0, 36.0, "portions"),
+        ingredient(
+            "parsnip",
+            "Parsnips",
+            &["parsnip", "parsnips"],
+            14.0,
+            10.0,
+            "lb",
+        ),
+        ingredient(
+            "salmon",
+            "Salmon",
+            &["salmon", "fish"],
+            24.0,
+            30.0,
+            "portions",
+        ),
+        ingredient(
+            "chicken",
+            "Chicken",
+            &["chicken", "poultry"],
+            38.0,
+            36.0,
+            "portions",
+        ),
         ingredient("farro", "Farro", &["farro", "grain"], 12.0, 8.0, "lb"),
-        ingredient("hazelnut", "Hazelnuts", &["hazelnut", "nuts"], 5.0, 6.0, "lb"),
-        ingredient("mushroom", "Mushrooms", &["mushroom", "mushrooms"], 15.0, 12.0, "lb"),
-        ingredient("cauliflower", "Cauliflower", &["cauliflower"], 11.0, 9.0, "heads"),
-        ingredient("beef", "Dry-aged beef", &["beef", "steak"], 8.0, 18.0, "portions"),
-        ingredient("chocolate", "Dark chocolate", &["chocolate"], 10.0, 8.0, "lb"),
+        ingredient(
+            "hazelnut",
+            "Hazelnuts",
+            &["hazelnut", "nuts"],
+            5.0,
+            6.0,
+            "lb",
+        ),
+        ingredient(
+            "mushroom",
+            "Mushrooms",
+            &["mushroom", "mushrooms"],
+            15.0,
+            12.0,
+            "lb",
+        ),
+        ingredient(
+            "cauliflower",
+            "Cauliflower",
+            &["cauliflower"],
+            11.0,
+            9.0,
+            "heads",
+        ),
+        ingredient(
+            "beef",
+            "Dry-aged beef",
+            &["beef", "steak"],
+            8.0,
+            18.0,
+            "portions",
+        ),
+        ingredient(
+            "chocolate",
+            "Dark chocolate",
+            &["chocolate"],
+            10.0,
+            8.0,
+            "lb",
+        ),
     ]
 }
 
@@ -277,8 +340,12 @@ pub fn tables() -> Vec<Table> {
     use DiningArea::*;
     use TableStatus::*;
     vec![
-        table("t1", "T1", 2, Window, Available, true, "server-2", None, None, 0.0),
-        table("t2", "T2", 4, Window, Available, true, "server-2", None, None, 0.0),
+        table(
+            "t1", "T1", 2, Window, Available, true, "server-2", None, None, 0.0,
+        ),
+        table(
+            "t2", "T2", 4, Window, Available, true, "server-2", None, None, 0.0,
+        ),
         table(
             "t3",
             "T3",
@@ -291,12 +358,24 @@ pub fn tables() -> Vec<Table> {
             Some("2026-08-09T21:35:00.000Z"),
             54.0,
         ),
-        table("t4", "T4", 6, Main, Available, true, "server-1", None, None, 0.0),
-        table("t5", "T5", 4, Main, Clearing, false, "server-1", None, None, 8.0),
-        table("t6", "T6", 2, Bar, Available, false, "server-2", None, None, 0.0),
-        table("t7", "T7", 4, Patio, Available, true, "server-3", None, None, 0.0),
-        table("t8", "T8", 6, Patio, Reserved, true, "server-3", None, None, 25.0),
-        table("t9", "T9", 8, Main, Available, true, "server-1", None, None, 0.0),
+        table(
+            "t4", "T4", 6, Main, Available, true, "server-1", None, None, 0.0,
+        ),
+        table(
+            "t5", "T5", 4, Main, Clearing, false, "server-1", None, None, 8.0,
+        ),
+        table(
+            "t6", "T6", 2, Bar, Available, false, "server-2", None, None, 0.0,
+        ),
+        table(
+            "t7", "T7", 4, Patio, Available, true, "server-3", None, None, 0.0,
+        ),
+        table(
+            "t8", "T8", 6, Patio, Reserved, true, "server-3", None, None, 25.0,
+        ),
+        table(
+            "t9", "T9", 8, Main, Available, true, "server-1", None, None, 0.0,
+        ),
     ]
 }
 

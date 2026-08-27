@@ -123,7 +123,10 @@ async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value)
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 fn token_request() -> Request<Body> {
@@ -182,7 +185,10 @@ async fn dish_context_is_mapped_onto_the_ui_shape() {
     assert_eq!(body["isFallback"], false);
     assert!(body["answer"].as_str().unwrap().contains("Golden beets"));
     assert_eq!(body["sources"].as_array().unwrap().len(), 1);
-    assert_eq!(body["sources"][0]["url"], "https://example.com/golden-beets");
+    assert_eq!(
+        body["sources"][0]["url"],
+        "https://example.com/golden-beets"
+    );
 
     let calls = recorded.lock().unwrap();
     assert_eq!(calls[0].path, "/search");
@@ -286,7 +292,9 @@ async fn stub_brain() -> (String, Arc<Mutex<Vec<Recorded>>>) {
         recorded: recorded.clone(),
         fail: false,
     };
-    let app = Router::new().route("/ask", post(answer_question)).with_state(state);
+    let app = Router::new()
+        .route("/ask", post(answer_question))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -350,7 +358,10 @@ async fn an_unreachable_brain_degrades_to_an_answer() {
     let (status, body) = send(&app, ask_request("who is waiting?")).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(body["answer"].as_str().unwrap().contains("POS is unaffected"));
+    assert!(body["answer"]
+        .as_str()
+        .unwrap()
+        .contains("POS is unaffected"));
 }
 
 #[tokio::test]

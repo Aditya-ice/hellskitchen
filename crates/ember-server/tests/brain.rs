@@ -125,7 +125,10 @@ async fn send(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 fn ids(body: &Value) -> Vec<String> {
@@ -192,7 +195,10 @@ async fn a_reranker_that_unblocks_a_dish_is_ignored_entirely() {
 
     let (_, body) = send(&app, "/api/recommendations/guest-maya").await;
 
-    assert_eq!(body["rankedBy"], "engine", "the bad ranking must be discarded");
+    assert_eq!(
+        body["rankedBy"], "engine",
+        "the bad ranking must be discarded"
+    );
     let tartare = body["dishes"]
         .as_array()
         .unwrap()
