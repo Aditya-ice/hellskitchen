@@ -366,7 +366,12 @@ export function PosShell() {
                       </div>
                       <div className="space-y-3 p-4">
                         {seatableRecommendations.slice(0, 3).map((recommendation, index) => {
-                          const table = pos.tables.find((item) => item.id === recommendation.id)!;
+                          const table = pos.tables.find((item) => item.id === recommendation.id);
+                          // Scores and tables arrive from two different
+                          // endpoints, so for a frame after a table is removed
+                          // they disagree. Skipping the row beats asserting and
+                          // taking the whole app down with it.
+                          if (!table) return null;
                           return (
                             <div key={table.id} className={`rounded-xl border p-3 ${index === 0 ? "border-success bg-success/5" : "border-line"}`}>
                               <div className="flex items-center justify-between">
@@ -473,7 +478,8 @@ export function PosShell() {
                 </p>
                 <div className="mt-4 space-y-2">
                   {seatableRecommendations.slice(0, 4).map((recommendation) => {
-                    const table = pos.tables.find((item) => item.id === recommendation.id)!;
+                    const table = pos.tables.find((item) => item.id === recommendation.id);
+                    if (!table) return null;
                     return (
                       <button
                         key={table.id}
@@ -555,7 +561,8 @@ export function PosShell() {
                     </div>
                     <div className="mt-2 space-y-2">
                       {dishRecommendations.filter((item) => item.eligible).slice(0, 3).map((recommendation, index) => {
-                        const item = pos.menuItems.find((menuItem) => menuItem.id === recommendation.id)!;
+                        const item = pos.menuItems.find((menuItem) => menuItem.id === recommendation.id);
+                        if (!item) return null;
                         return (
                           <button
                             key={item.id}
@@ -675,32 +682,45 @@ export function PosShell() {
                 ) : (
                   <div className="space-y-3">
                     {selectedOrder.lines.map((line) => {
-                      const item = pos.menuItems.find((menuItem) => menuItem.id === line.menuItemId)!;
+                      const item = pos.menuItems.find((menuItem) => menuItem.id === line.menuItemId);
+                      const label = item?.name ?? line.menuItemId;
                       return (
                         <div key={line.menuItemId} className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-sm font-black">{item.name}</p>
-                            <p className="mt-0.5 text-xs text-ink-muted">${item.price} each</p>
+                            {/* The line stays on the check even when the menu
+                                failed to load: dropping it would understate
+                                what the party is being charged for. */}
+                            <p className="text-sm font-black">{label}</p>
+                            <p className="mt-0.5 text-xs text-ink-muted">
+                              {item ? `$${item.price} each` : "Price unavailable"}
+                            </p>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1">
+                            {/* 44px hit areas around a 24px control: these are
+                                the most-tapped buttons in the app and they are
+                                used on a phone, mid-service, at speed. */}
                             <button
                               type="button"
                               disabled={isLockedOrder(selectedOrder)}
-                              onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, item.id)}
-                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
-                              aria-label={`Remove one ${item.name}`}
+                              onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, line.menuItemId)}
+                              className="grid size-11 place-items-center rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Remove one ${label}`}
                             >
-                              <Minus className="size-3" />
+                              <span className="grid size-6 place-items-center rounded-full border border-line">
+                                <Minus className="size-3" aria-hidden="true" />
+                              </span>
                             </button>
                             <span className="w-4 text-center text-xs font-black">{line.quantity}</span>
                             <button
                               type="button"
                               disabled={isLockedOrder(selectedOrder)}
-                              onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
-                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
-                              aria-label={`Add one ${item.name}`}
+                              onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, line.menuItemId)}
+                              className="grid size-11 place-items-center rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Add one ${label}`}
                             >
-                              <Plus className="size-3" />
+                              <span className="grid size-6 place-items-center rounded-full border border-line">
+                                <Plus className="size-3" aria-hidden="true" />
+                              </span>
                             </button>
                           </div>
                         </div>
@@ -728,7 +748,16 @@ export function PosShell() {
                 </div>
                 <button
                   type="button"
-                  disabled={!selectedGuest || !selectedOrder?.lines.length || isLockedOrder(selectedOrder)}
+                  // `pos.pending` matters here: firing is irreversible, and
+                  // between the tap and the next revision this button was still
+                  // enabled. A second tap sends a second action with a fresh
+                  // id, so the server's dedupe-by-id cannot catch it.
+                  disabled={
+                    !selectedGuest ||
+                    !selectedOrder?.lines.length ||
+                    isLockedOrder(selectedOrder) ||
+                    pos.pending > 0
+                  }
                   onClick={() => selectedGuest && pos.sendOrder(selectedGuest.id)}
                   className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-3 text-sm font-black text-white hover:bg-accent-dark disabled:bg-line disabled:text-ink-muted"
                 >
