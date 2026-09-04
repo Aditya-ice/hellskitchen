@@ -162,7 +162,11 @@ mod tests {
         let answer = AgentAnswer::not_running();
         assert!(!answer.configured);
         assert!(answer.answer.contains("npm run brain"), "{}", answer.answer);
-        assert!(answer.answer.contains("does not need it"), "{}", answer.answer);
+        assert!(
+            answer.answer.contains("does not need it"),
+            "{}",
+            answer.answer
+        );
     }
 
     #[test]

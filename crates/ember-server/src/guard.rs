@@ -18,14 +18,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-pub const SESSION_COOKIE: &str = "ember_demo_session";
-
 /// Why a request was refused, and what the client should be told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
     CrossSite,
     InvalidOrigin,
-    NoSession,
     RateLimited { retry_after_secs: u64 },
 }
 
@@ -37,10 +34,6 @@ impl Rejection {
                 "Cross-site requests are not allowed.",
             ),
             Rejection::InvalidOrigin => (StatusCode::FORBIDDEN, "Invalid request origin."),
-            Rejection::NoSession => (
-                StatusCode::UNAUTHORIZED,
-                "Start a demo session before using sponsor integrations.",
-            ),
             Rejection::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Please try again shortly.",
@@ -73,30 +66,6 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-/// Reads one cookie out of the `Cookie` header.
-fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    header(headers, "cookie")?.split(';').find_map(|part| {
-        let (key, value) = part.split_once('=')?;
-        (key.trim() == name).then_some(value.trim())
-    })
-}
-
-/// A demo session id is a UUID. Anything else is treated as absent.
-fn is_session_id(value: &str) -> bool {
-    value.len() == 36
-        && value
-            .chars()
-            .all(|character| character.is_ascii_hexdigit() || character == '-')
-}
-
-pub fn demo_session(headers: &HeaderMap) -> Option<&str> {
-    cookie(headers, SESSION_COOKIE).filter(|value| is_session_id(value))
-}
-
-pub fn require_demo_session(headers: &HeaderMap) -> Result<&str, Rejection> {
-    demo_session(headers).ok_or(Rejection::NoSession)
-}
-
 /// Rejects requests that a browser tells us came from another site, and
 /// requests whose `Origin` does not match the host they were sent to.
 ///
@@ -126,7 +95,15 @@ pub fn require_same_origin(headers: &HeaderMap) -> Result<(), Rejection> {
     }
 }
 
-fn client_ip(headers: &HeaderMap) -> &str {
+/// Best guess at who is calling.
+///
+/// `X-Forwarded-For` is only believed when the deployment says it is behind a
+/// proxy that sets it. Trusting it unconditionally, as this used to, lets any
+/// client pick its own identity and so reset its own quota at will.
+fn client_ip(headers: &HeaderMap, trust_forwarded_for: bool) -> &str {
+    if !trust_forwarded_for {
+        return "direct";
+    }
     header(headers, "x-forwarded-for")
         .and_then(|value| value.split(',').next())
         .map(str::trim)
@@ -139,6 +116,9 @@ fn client_ip(headers: &HeaderMap) -> &str {
 ///
 /// The identity half matters: without it one visitor exhausting a quota would
 /// lock out everyone else. `limits_each_identity_separately` pins that.
+/// Sweep the bucket map once it passes this many identities.
+const GC_THRESHOLD: usize = 1_024;
+
 #[derive(Default)]
 pub struct RateLimiter {
     buckets: Mutex<HashMap<String, Vec<Instant>>>,
@@ -153,13 +133,38 @@ impl RateLimiter {
         &self,
         headers: &HeaderMap,
         scope: &str,
+        trust_forwarded_for: bool,
         limit: usize,
         window: Duration,
     ) -> Result<(), Rejection> {
+        self.check_peer(headers, scope, None, trust_forwarded_for, limit, window)
+    }
+
+    /// As `check`, but falls back to the socket's peer address when there is no
+    /// proxy header and no session cookie to identify the caller by.
+    ///
+    /// Needed for sign-in, which by definition runs before any cookie exists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_peer(
+        &self,
+        headers: &HeaderMap,
+        scope: &str,
+        peer: Option<std::net::IpAddr>,
+        trust_forwarded_for: bool,
+        limit: usize,
+        window: Duration,
+    ) -> Result<(), Rejection> {
+        let forwarded = client_ip(headers, trust_forwarded_for);
+        let caller = match (forwarded, peer) {
+            // A proxy header we are configured to believe wins; otherwise the
+            // socket is the only identity nobody can forge.
+            ("direct", Some(address)) => address.to_string(),
+            (value, _) => value.to_string(),
+        };
         let identity = format!(
             "{}:{}",
-            client_ip(headers),
-            demo_session(headers).unwrap_or("anonymous")
+            caller,
+            crate::session::session_cookie(headers).unwrap_or("anonymous")
         );
         let key = format!("{scope}:{identity}");
         let now = Instant::now();
@@ -169,6 +174,17 @@ impl RateLimiter {
             // A poisoned lock must not become an open door.
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        // Sweep before inserting. Without this the map grows a permanent entry
+        // for every distinct identity ever seen -- an unbounded leak over the
+        // lifetime of a venue, since nothing else ever removes a key.
+        if buckets.len() > GC_THRESHOLD {
+            buckets.retain(|_, stamps| {
+                stamps.retain(|stamp| now.duration_since(*stamp) < window);
+                !stamps.is_empty()
+            });
+        }
+
         let bucket = buckets.entry(key).or_default();
         bucket.retain(|stamp| now.duration_since(*stamp) < window);
 
@@ -184,17 +200,6 @@ impl RateLimiter {
         bucket.push(now);
         Ok(())
     }
-}
-
-/// Builds the `Set-Cookie` value for a new demo session.
-///
-/// `secure` is passed in rather than read from the environment so that both
-/// branches are reachable from a test.
-pub fn session_cookie(value: &str, secure: bool) -> String {
-    format!(
-        "{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600{}",
-        if secure { "; Secure" } else { "" }
-    )
 }
 
 #[cfg(test)]
@@ -266,58 +271,21 @@ mod tests {
         assert_eq!(require_same_origin(&request), Err(Rejection::InvalidOrigin));
     }
 
-    // --- demo session ---
-
-    #[test]
-    fn requires_a_valid_demo_session_cookie() {
-        assert_eq!(
-            require_demo_session(&headers(&[])),
-            Err(Rejection::NoSession)
-        );
-
-        let valid = headers(&[(
-            "cookie",
-            "ember_demo_session=123e4567-e89b-12d3-a456-426614174000",
-        )]);
-        assert_eq!(
-            require_demo_session(&valid),
-            Ok("123e4567-e89b-12d3-a456-426614174000")
-        );
-    }
-
-    #[test]
-    fn a_malformed_session_cookie_is_treated_as_absent() {
-        let request = headers(&[("cookie", "ember_demo_session=not-a-uuid")]);
-        assert_eq!(require_demo_session(&request), Err(Rejection::NoSession));
-    }
-
-    #[test]
-    fn the_session_cookie_is_found_among_others() {
-        let request = headers(&[(
-            "cookie",
-            "theme=dark; ember_demo_session=123e4567-e89b-12d3-a456-426614174000; other=1",
-        )]);
-        assert!(demo_session(&request).is_some());
-    }
-
     // --- rate limiting ---
 
     #[test]
     fn limits_repeated_requests_for_the_same_session() {
         let limiter = RateLimiter::new();
         let request = headers(&[
-            (
-                "cookie",
-                "ember_demo_session=123e4567-e89b-12d3-a456-426614174001",
-            ),
+            ("cookie", "ember_session=abc123"),
             ("x-forwarded-for", "203.0.113.8"),
         ]);
         let window = Duration::from_secs(60);
 
-        assert_eq!(limiter.check(&request, "test", 2, window), Ok(()));
-        assert_eq!(limiter.check(&request, "test", 2, window), Ok(()));
+        assert_eq!(limiter.check(&request, "test", true, 2, window), Ok(()));
+        assert_eq!(limiter.check(&request, "test", true, 2, window), Ok(()));
         assert!(matches!(
-            limiter.check(&request, "test", 2, window),
+            limiter.check(&request, "test", true, 2, window),
             Err(Rejection::RateLimited { .. })
         ));
     }
@@ -330,27 +298,21 @@ mod tests {
         let window = Duration::from_secs(60);
 
         let first = headers(&[
-            (
-                "cookie",
-                "ember_demo_session=123e4567-e89b-12d3-a456-426614174001",
-            ),
+            ("cookie", "ember_session=aaa111"),
             ("x-forwarded-for", "203.0.113.8"),
         ]);
         let second = headers(&[
-            (
-                "cookie",
-                "ember_demo_session=123e4567-e89b-12d3-a456-426614174002",
-            ),
+            ("cookie", "ember_session=bbb222"),
             ("x-forwarded-for", "203.0.113.9"),
         ]);
 
         // Exhaust the first caller's quota entirely.
-        assert_eq!(limiter.check(&first, "test", 1, window), Ok(()));
-        assert!(limiter.check(&first, "test", 1, window).is_err());
+        assert_eq!(limiter.check(&first, "test", true, 1, window), Ok(()));
+        assert!(limiter.check(&first, "test", true, 1, window).is_err());
 
         // A different caller must be unaffected.
         assert_eq!(
-            limiter.check(&second, "test", 1, window),
+            limiter.check(&second, "test", true, 1, window),
             Ok(()),
             "one caller exhausting a quota must not lock out everyone else"
         );
@@ -362,9 +324,9 @@ mod tests {
         let request = headers(&[("x-forwarded-for", "203.0.113.8")]);
         let window = Duration::from_secs(60);
 
-        assert_eq!(limiter.check(&request, "scope-a", 1, window), Ok(()));
-        assert!(limiter.check(&request, "scope-a", 1, window).is_err());
-        assert_eq!(limiter.check(&request, "scope-b", 1, window), Ok(()));
+        assert_eq!(limiter.check(&request, "scope-a", true, 1, window), Ok(()));
+        assert!(limiter.check(&request, "scope-a", true, 1, window).is_err());
+        assert_eq!(limiter.check(&request, "scope-b", true, 1, window), Ok(()));
     }
 
     #[test]
@@ -373,8 +335,14 @@ mod tests {
         let request = headers(&[("x-forwarded-for", "203.0.113.8")]);
 
         // A zero-length window means every entry is already stale.
-        assert_eq!(limiter.check(&request, "test", 1, Duration::ZERO), Ok(()));
-        assert_eq!(limiter.check(&request, "test", 1, Duration::ZERO), Ok(()));
+        assert_eq!(
+            limiter.check(&request, "test", true, 1, Duration::ZERO),
+            Ok(())
+        );
+        assert_eq!(
+            limiter.check(&request, "test", true, 1, Duration::ZERO),
+            Ok(())
+        );
     }
 
     #[test]
@@ -383,35 +351,12 @@ mod tests {
         let request = headers(&[("x-forwarded-for", "203.0.113.8")]);
         let window = Duration::from_secs(60);
 
-        limiter.check(&request, "test", 1, window).unwrap();
-        match limiter.check(&request, "test", 1, window) {
+        limiter.check(&request, "test", true, 1, window).unwrap();
+        match limiter.check(&request, "test", true, 1, window) {
             Err(Rejection::RateLimited { retry_after_secs }) => {
                 assert!((1..=60).contains(&retry_after_secs), "{retry_after_secs}");
             }
             other => panic!("expected a rate-limit rejection, got {other:?}"),
         }
-    }
-
-    // --- session cookie ---
-
-    #[test]
-    fn creates_a_strict_http_only_session_cookie() {
-        let cookie = session_cookie("123e4567-e89b-12d3-a456-426614174000", false);
-        assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("SameSite=Strict"));
-        assert!(cookie.contains("Max-Age=3600"));
-        assert!(
-            !cookie.contains("Secure"),
-            "plain http must not set Secure, or the browser drops the cookie"
-        );
-    }
-
-    #[test]
-    fn marks_the_cookie_secure_when_served_over_https() {
-        // Unreachable in the original test: `Secure` was gated on NODE_ENV, and
-        // vitest always ran with NODE_ENV=test.
-        let cookie = session_cookie("123e4567-e89b-12d3-a456-426614174000", true);
-        assert!(cookie.contains("; Secure"));
-        assert!(cookie.contains("HttpOnly"));
     }
 }

@@ -25,21 +25,38 @@ fn clamp_score(score: f64) -> f64 {
     score.round().clamp(0.0, 100.0)
 }
 
-pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
+/// Why this party cannot sit at this table, or `None` when they can.
+///
+/// The order of the checks is the order a host would think in, so the reason
+/// they are told is the most useful one rather than whichever test happened to
+/// run first.
+pub fn seating_obstacle(guest: &GuestProfile, table: &Table) -> Option<Rejection> {
     let may_be_seated = matches!(
         guest.status,
         GuestStatus::Waiting | GuestStatus::Seated | GuestStatus::Ordered
     );
+    if !may_be_seated {
+        return Some(Rejection::GuestNotReadyToSeat);
+    }
+    if table.status != TableStatus::Available || table.seated_guest_id.is_some() {
+        return Some(Rejection::TableUnavailable);
+    }
+    if table.capacity < guest.party_size {
+        return Some(Rejection::TableTooSmall);
+    }
+
     let needs_accessible = guest
         .seating_preferences
         .iter()
         .any(|preference| preference == "accessible");
+    if needs_accessible && !table.accessible {
+        return Some(Rejection::TableNotAccessible);
+    }
+    None
+}
 
-    may_be_seated
-        && table.status == TableStatus::Available
-        && table.seated_guest_id.is_none()
-        && table.capacity >= guest.party_size
-        && (!needs_accessible || table.accessible)
+pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
+    seating_obstacle(guest, table).is_none()
 }
 
 pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommendation> {
@@ -139,9 +156,11 @@ pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommend
 
     // Stable sort, matching JS: eligible first, then score descending.
     recommendations.sort_by(|a, b| {
-        b.eligible
-            .cmp(&a.eligible)
-            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     recommendations
 }
@@ -167,8 +186,11 @@ pub fn recommend_dishes(
             let mut reasons: Vec<String> = Vec::new();
             let mut warnings: Vec<String> = Vec::new();
 
-            let normalized_allergens: Vec<String> =
-                item.allergens.iter().map(|value| normalize(value)).collect();
+            let normalized_allergens: Vec<String> = item
+                .allergens
+                .iter()
+                .map(|value| normalize(value))
+                .collect();
             let allergy_matches: Vec<&String> = guest
                 .allergies
                 .iter()
@@ -215,13 +237,8 @@ pub fn recommend_dishes(
             let mut score = item.popularity * 0.42 + item.margin_score * 0.22;
             score += (22.0 - item.prep_minutes).max(0.0) * 0.65;
 
-            let search_text = format!(
-                "{} {} {}",
-                item.name,
-                item.description,
-                item.tags.join(" ")
-            )
-            .to_lowercase();
+            let search_text = format!("{} {} {}", item.name, item.description, item.tags.join(" "))
+                .to_lowercase();
 
             let matched_likes: Vec<&String> = guest
                 .likes
@@ -286,25 +303,35 @@ pub fn recommend_dishes(
         .collect();
 
     recommendations.sort_by(|a, b| {
-        b.eligible
-            .cmp(&a.eligible)
-            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     recommendations
 }
 
-pub fn order_total(order: Option<&Order>, menu_items: &[MenuItem]) -> f64 {
-    let Some(order) = order else { return 0.0 };
+/// The check total, in minor units.
+///
+/// Reads the price recorded on each line rather than looking it up in the menu,
+/// so repricing a dish no longer rewrites checks that already contain it — the
+/// bug that made every historical total a function of today's menu. `menu_items`
+/// remains only as the fallback for lines written before prices were captured.
+pub fn order_total(order: Option<&Order>, menu_items: &[MenuItem]) -> i64 {
+    let Some(order) = order else { return 0 };
     order
         .lines
         .iter()
         .map(|line| {
-            let price = menu_items
-                .iter()
-                .find(|item| item.id == line.menu_item_id)
-                .map(|item| item.price)
-                .unwrap_or(0.0);
-            price * line.quantity as f64
+            let unit = line.unit_price_cents.unwrap_or_else(|| {
+                menu_items
+                    .iter()
+                    .find(|item| item.id == line.menu_item_id)
+                    .map(|item| item.price_cents)
+                    .unwrap_or(0)
+            });
+            unit.saturating_mul(i64::from(line.quantity))
         })
         .sum()
 }
@@ -385,8 +412,11 @@ mod tests {
 
     #[test]
     fn blocks_explicit_allergens_and_unmet_dietary_requirements() {
-        let recommendations =
-            recommend_dishes(&guest("guest-maya"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         let tartare = find(&recommendations, "carrot-tartare");
         assert!(!tartare.eligible);
@@ -403,8 +433,11 @@ mod tests {
 
     #[test]
     fn keeps_only_vegan_compatible_dishes_eligible_for_a_vegan_guest() {
-        let recommendations =
-            recommend_dishes(&guest("guest-jordan"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-jordan"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         assert!(find(&recommendations, "cauliflower").eligible);
         assert!(!find(&recommendations, "herb-chicken").eligible);
@@ -412,37 +445,81 @@ mod tests {
 
     #[test]
     fn ineligible_dishes_always_score_zero() {
-        let recommendations =
-            recommend_dishes(&guest("guest-maya"), &seed::menu_items(), &seed::ingredients());
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
 
         for recommendation in recommendations.iter().filter(|item| !item.eligible) {
-            assert_eq!(recommendation.score, 0.0, "{} scored above zero", recommendation.id);
+            assert_eq!(
+                recommendation.score, 0.0,
+                "{} scored above zero",
+                recommendation.id
+            );
         }
     }
 
     // --- orders ---
 
+    fn line(menu_item_id: &str, quantity: u32, unit_price_cents: Option<i64>) -> OrderLine {
+        OrderLine {
+            menu_item_id: menu_item_id.into(),
+            quantity,
+            notes: String::new(),
+            unit_price_cents,
+            name_snapshot: None,
+        }
+    }
+
     #[test]
-    fn calculates_totals_from_quantity_and_menu_price() {
+    fn totals_come_from_the_price_recorded_on_each_line() {
         let mut order = seed::orders().remove(0);
         order.lines = vec![
-            OrderLine {
-                menu_item_id: "beet-salad".into(),
-                quantity: 2,
-                notes: String::new(),
-            },
-            OrderLine {
-                menu_item_id: "chocolate-torte".into(),
-                quantity: 1,
-                notes: String::new(),
-            },
+            line("beet-salad", 2, Some(1700)),
+            line("chocolate-torte", 1, Some(1400)),
         ];
 
-        assert_eq!(order_total(Some(&order), &seed::menu_items()), 48.0);
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 4800);
+    }
+
+    #[test]
+    fn repricing_a_dish_does_not_rewrite_a_check_that_already_holds_it() {
+        // The whole reason prices are captured on the line. Totals used to be
+        // recomputed from the live menu, so a price change silently restated
+        // every check the dish had ever appeared on, settled ones included.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, Some(1700))];
+
+        let mut repriced = seed::menu_items();
+        for item in repriced.iter_mut().filter(|item| item.id == "beet-salad") {
+            item.price_cents = 9900;
+        }
+
+        assert_eq!(order_total(Some(&order), &repriced), 3400);
+    }
+
+    #[test]
+    fn a_line_from_before_prices_were_recorded_falls_back_to_the_menu() {
+        // No price was captured for these, so the menu is the only information
+        // there is about them — which is exactly how they were totalled when
+        // they were written.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 3400);
+    }
+
+    #[test]
+    fn an_unknown_dish_on_an_old_line_totals_zero_rather_than_panicking() {
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("withdrawn-dish", 3, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 0);
     }
 
     #[test]
     fn an_absent_order_totals_zero() {
-        assert_eq!(order_total(None, &seed::menu_items()), 0.0);
+        assert_eq!(order_total(None, &seed::menu_items()), 0);
     }
 }

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: Web (lint, types, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  rust:
+    name: Rust (clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # src-tauri is excluded here: it needs webkit2gtk and is covered by the
+      # `desktop` job on macOS, which is the only platform it ships on.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check -p ember-core -p ember-store -p ember-server
+      - run: cargo clippy -p ember-core -p ember-store -p ember-server --all-targets -- -D warnings
+      - run: cargo test -p ember-core -p ember-store -p ember-server
+      # cargo test regenerates lib/generated/ from the Rust types. If that
+      # produces a diff, the committed TypeScript has drifted from the domain
+      # model and the two languages no longer agree on the wire format.
+      - name: Generated types are up to date
+        run: git diff --exit-code -- lib/generated/
+
+  brain:
+    name: Floor agent (lint, types, tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/brain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # --frozen fails if uv.lock disagrees with pyproject.toml, so a dependency
+      # bump cannot reach CI without its lockfile.
+      - run: uv sync --frozen --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy brain
+      - run: uv run pytest
+
+  desktop:
+    name: macOS app builds
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      # The desktop bundle embeds the exported UI, so the web build runs first.
+      - run: npm run build
+      - run: cargo fmt --check -p ember-desktop
+      - run: cargo clippy -p ember-desktop --all-targets -- -D warnings
+      - run: cargo test -p ember-desktop
+      - run: cargo build --release -p ember-desktop

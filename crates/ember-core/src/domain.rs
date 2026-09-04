@@ -17,6 +17,76 @@ pub fn format_amount(value: f64) -> String {
     }
 }
 
+/// Why the reducer refused an action.
+///
+/// The tag is the contract: a client switches on it to decide what to say and
+/// whether to offer a way out, so these are stable identifiers rather than
+/// prose. `message` is the fallback for a surface that has not mapped a variant
+/// yet — it is not the primary interface, and it is not localised.
+///
+/// A refusal is not an error. Two hosts racing for the same table is ordinary
+/// during a service; what is not acceptable is the second one seeing nothing
+/// happen with no explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum Rejection {
+    /// No guest with that id. Usually a stale client.
+    UnknownGuest,
+    UnknownTable,
+    UnknownOrder,
+    UnknownIngredient,
+    UnknownMenuItem,
+    /// Check-in only applies to a party that has not arrived yet.
+    GuestNotExpected,
+    /// A walk-in id that is already on the floor.
+    GuestAlreadyPresent,
+    /// The party is already sitting there.
+    AlreadyAtThatTable,
+    /// The party has not checked in, so there is nobody to seat.
+    GuestNotReadyToSeat,
+    /// Somebody else is sitting there, or it has not been cleared.
+    TableUnavailable,
+    TableTooSmall,
+    /// The party needs step-free access and this table has none.
+    TableNotAccessible,
+    /// No draft order to edit. Either nothing is open, or it is already fired.
+    NoOpenOrder,
+    /// The ticket is with the kitchen and cannot be edited.
+    OrderLocked,
+    /// Firing an empty ticket.
+    OrderEmpty,
+    /// Only a ticket that reached the kitchen can be bumped.
+    TicketNotSent,
+    /// A restock that is not a positive, finite number.
+    InvalidQuantity,
+}
+
+impl Rejection {
+    /// Plain-language fallback, safe to show a member of staff mid-service.
+    pub fn message(self) -> &'static str {
+        match self {
+            Rejection::UnknownGuest => "That guest is no longer on the floor.",
+            Rejection::UnknownTable => "That table is no longer on the floor plan.",
+            Rejection::UnknownOrder => "That ticket no longer exists.",
+            Rejection::UnknownIngredient => "That ingredient is not in the larder.",
+            Rejection::UnknownMenuItem => "That dish is not on the menu.",
+            Rejection::GuestNotExpected => "That party has already checked in.",
+            Rejection::GuestAlreadyPresent => "That party is already on the floor.",
+            Rejection::AlreadyAtThatTable => "That party is already at that table.",
+            Rejection::GuestNotReadyToSeat => "Check the party in before seating them.",
+            Rejection::TableUnavailable => "That table is taken.",
+            Rejection::TableTooSmall => "That table is too small for the party.",
+            Rejection::TableNotAccessible => "That party needs an accessible table.",
+            Rejection::NoOpenOrder => "There is no open order for that party.",
+            Rejection::OrderLocked => "That ticket is with the kitchen and cannot be changed.",
+            Rejection::OrderEmpty => "Add something to the order before sending it.",
+            Rejection::TicketNotSent => "That ticket has not been fired yet.",
+            Rejection::InvalidQuantity => "Enter a quantity greater than zero.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
@@ -113,10 +183,18 @@ pub struct MenuItem {
     pub ingredient_ids: Vec<String>,
     pub tags: Vec<String>,
     pub allergens: Vec<String>,
-    // NOTE: money as f64 mirrors the TypeScript `number` this was ported from.
-    // Worth moving to integer cents, but that changes the wire format and every
-    // price format call in the UI, so it is deliberately left for a follow-up.
-    pub price: f64,
+    /// Price in minor units — cents for USD.
+    ///
+    /// Integer, not a float. `0.1 + 0.2` is famously not `0.3`, and a till that
+    /// is a cent out at the end of a service is a till nobody trusts. Every
+    /// total in this system is integer arithmetic from here to the check.
+    ///
+    /// Typed as `number` on the wire, not `bigint`: serde_json writes it as a
+    /// JSON number and `JSON.parse` hands back a JS number, so `bigint` would
+    /// describe a value the client never actually receives. A cent count stays
+    /// exact in a double well past any sum a restaurant will take.
+    #[ts(type = "number")]
+    pub price_cents: i64,
     pub prep_minutes: f64,
     pub popularity: f64,
     pub margin_score: f64,
@@ -179,6 +257,24 @@ pub struct OrderLine {
     pub menu_item_id: String,
     pub quantity: u32,
     pub notes: String,
+    /// What one of these cost when it was added to the check.
+    ///
+    /// Totals used to be recomputed from the *live* menu, so repricing a dish
+    /// silently rewrote every check that had ever contained it, including ones
+    /// already settled. A check is a record of what was agreed, so the price
+    /// is captured here at the moment the line is created and never looked up
+    /// again.
+    ///
+    /// `None` only for lines written before this existed. Those have no
+    /// recorded price, so they fall back to the menu — the behaviour they were
+    /// created under, and the only information there is about them.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub unit_price_cents: Option<i64>,
+    /// What the dish was called when it was added, so a renamed or withdrawn
+    /// dish still reads correctly on an old check.
+    #[serde(default)]
+    pub name_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

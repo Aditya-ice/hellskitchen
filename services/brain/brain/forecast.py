@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .history import History
@@ -52,9 +52,7 @@ def confidence_from(history: History, now: datetime) -> Confidence:
     if fires == 0:
         return Confidence("none", "no tickets have been fired yet")
     if fires < FAIR_EVIDENCE_FIRES:
-        return Confidence(
-            "low", f"only {fires} ticket{'' if fires == 1 else 's'} so far"
-        )
+        return Confidence("low", f"only {fires} ticket{'' if fires == 1 else 's'} so far")
     if minutes < FAIR_EVIDENCE_MINUTES:
         return Confidence("low", f"only {minutes:.0f} minutes of service so far")
     return Confidence("fair", f"{fires} tickets over {minutes:.0f} minutes")
@@ -107,7 +105,7 @@ def forecast_stockouts(
     untouched is not "about to run out", however little of it there is —
     reporting it as a risk would bury the ones that matter.
     """
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     hours = history.span(moment).total_seconds() / 3600
     if hours <= 0:
         return []
@@ -162,7 +160,7 @@ class CoverForecast:
 
 
 def forecast_covers(history: History, now: datetime | None = None) -> CoverForecast:
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     hours = history.span(moment).total_seconds() / 3600
     servings = sum(fire.covers for fire in history.fires)
 
@@ -184,7 +182,7 @@ def build_forecast(
     now: datetime | None = None,
     horizon_minutes: float = 90.0,
 ) -> dict[str, Any]:
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     confidence = confidence_from(history, moment)
     risks = forecast_stockouts(history, ingredients, menu_items, moment, horizon_minutes)
     covers = forecast_covers(history, moment)

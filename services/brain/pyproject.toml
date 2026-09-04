@@ -4,14 +4,16 @@ version = "0.1.0"
 description = "Optional model services for Ember POS. The POS runs without it."
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.116",
+    # Upper-bounded: 0.x -> 1.x carried breaking changes, and an unbounded
+    # major means a fresh install can pick up the next one silently.
+    "anthropic>=1.0,<2",
     "fastapi>=0.115",
     "httpx>=0.27",
     "uvicorn[standard]>=0.32",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9", "mypy>=1.14"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -26,3 +28,31 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["brain"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, comprehensions, pyupgrade, and the
+# async-correctness rules -- this service is almost entirely async I/O.
+select = ["E", "F", "I", "B", "C4", "UP", "ASYNC", "RUF"]
+# The prose in this service uses en/em dashes and typographic quotes on
+# purpose, in docstrings the model is shown verbatim. Flagging them as
+# "ambiguous unicode" would mean rewriting deliberate copy.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# The Anthropic SDK's beta surface is partially untyped; the rest of the service
+# is checked strictly and the boundary is narrowed at the call site instead.
+[[tool.mypy.overrides]]
+module = ["anthropic.*"]
+follow_untyped_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# The tool docstrings in agent.py are the tool *descriptions* the model is
+# shown, verbatim. Wrapping one would put a newline into the text the model
+# reads, so they are exempt from the line-length rule rather than reflowed.
+"brain/agent.py" = ["E501"]

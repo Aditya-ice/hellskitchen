@@ -11,7 +11,7 @@
     "build:server": "cargo build --release -p ember-server",
     "desktop:build": "npm run build && tauri build",
     "start": "npm run build && npm run build:server && EMBER_STATIC_DIR=./out ./target/release/ember-server",
-    "lint": "eslint",
+    "lint": "eslint --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:rust": "cargo test",

@@ -33,12 +33,17 @@ describe("api base resolution", () => {
 });
 
 describe("action construction", () => {
-  it("stamps an id and timestamp the server can dedupe on", () => {
+  it("stamps an id the server can dedupe on, and nothing else", () => {
     const action = newAction({ type: "send-order", guestId: "guest-maya" });
 
     expect(action).toMatchObject({ type: "send-order", guestId: "guest-maya" });
-    expect(action.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(Number.isNaN(Date.parse(action.at))).toBe(false);
+    expect(action.id).toMatch(/^[0-9a-f-]{32,36}$/);
+
+    // The time and the actor are the server's to stamp. A client-supplied
+    // timestamp used to become the ticket's `sentAt`, so cook time was
+    // whatever the client claimed it was.
+    expect(action).not.toHaveProperty("at");
+    expect(action).not.toHaveProperty("actor");
   });
 
   it("gives every action a distinct id", () => {

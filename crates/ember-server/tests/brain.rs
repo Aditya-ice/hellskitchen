@@ -4,6 +4,8 @@
 //! whether or not the brain is there, and a reranker that misbehaves must not
 //! be able to change what a guest may be sold.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -12,10 +14,9 @@ use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ember_server::{AppState, Config};
+use ember_server::Config;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tower::ServiceExt;
 
 /// How the stub brain should behave.
 #[derive(Clone, Copy, PartialEq)]
@@ -106,26 +107,16 @@ async fn stub_brain(behaviour: Behaviour) -> (String, Arc<Mutex<Vec<Value>>>) {
     (format!("http://{address}"), calls)
 }
 
-fn app_with(base: Option<&str>) -> axum::Router {
-    ember_server::router(
-        AppState::new(Config {
-            brain_url: base.map(str::to_string),
-            ..Config::default()
-        })
-        .expect("in-memory store"),
-    )
+async fn app_with(base: Option<&str>) -> common::TestApp {
+    common::signed_in(Config {
+        brain_url: base.map(str::to_string),
+        ..Config::default()
+    })
+    .await
 }
 
-async fn send(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
-    let request = Request::builder()
-        .uri(uri)
-        .header("host", "localhost:4000")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+async fn send(app: &common::TestApp, uri: &str) -> (StatusCode, Value) {
+    app.send(common::get(uri)).await
 }
 
 fn ids(body: &Value) -> Vec<String> {
@@ -141,7 +132,7 @@ fn ids(body: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn without_a_brain_the_engine_ranking_is_served() {
-    let app = app_with(None);
+    let app = app_with(None).await;
     let (status, body) = send(&app, "/api/recommendations/guest-maya").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -152,7 +143,7 @@ async fn without_a_brain_the_engine_ranking_is_served() {
 #[tokio::test]
 async fn a_brain_reranking_is_applied_and_labelled() {
     let (base, calls) = stub_brain(Behaviour::Reorder).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (_, engine) = send(&app, "/api/recommendations/guest-maya?rerank=false").await;
     let (_, reranked) = send(&app, "/api/recommendations/guest-maya").await;
@@ -175,7 +166,7 @@ async fn a_brain_reranking_is_applied_and_labelled() {
 async fn rerank_false_never_consults_the_brain() {
     // This is what breaks the loop, so it is worth pinning.
     let (base, calls) = stub_brain(Behaviour::Reorder).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (_, body) = send(&app, "/api/recommendations/guest-maya?rerank=false").await;
 
@@ -188,11 +179,14 @@ async fn a_reranker_that_unblocks_a_dish_is_ignored_entirely() {
     // The whole reason the model sits outside the engine. Maya has a tree-nut
     // allergy; no ranking may make the tartare sellable.
     let (base, _) = stub_brain(Behaviour::FlipEligibility).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (_, body) = send(&app, "/api/recommendations/guest-maya").await;
 
-    assert_eq!(body["rankedBy"], "engine", "the bad ranking must be discarded");
+    assert_eq!(
+        body["rankedBy"], "engine",
+        "the bad ranking must be discarded"
+    );
     let tartare = body["dishes"]
         .as_array()
         .unwrap()
@@ -211,7 +205,7 @@ async fn a_reranker_that_unblocks_a_dish_is_ignored_entirely() {
 #[tokio::test]
 async fn a_reranker_that_loses_a_dish_is_ignored() {
     let (base, _) = stub_brain(Behaviour::DropDish).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (_, body) = send(&app, "/api/recommendations/guest-maya").await;
 
@@ -222,7 +216,7 @@ async fn a_reranker_that_loses_a_dish_is_ignored() {
 #[tokio::test]
 async fn a_brain_reporting_itself_unavailable_falls_back_quietly() {
     let (base, _) = stub_brain(Behaviour::Unavailable).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (status, body) = send(&app, "/api/recommendations/guest-maya").await;
 
@@ -232,7 +226,7 @@ async fn a_brain_reporting_itself_unavailable_falls_back_quietly() {
 
 #[tokio::test]
 async fn an_unreachable_brain_falls_back_quietly() {
-    let app = app_with(Some("http://127.0.0.1:1"));
+    let app = app_with(Some("http://127.0.0.1:1")).await;
     let (status, body) = send(&app, "/api/recommendations/guest-maya").await;
 
     assert_eq!(status, StatusCode::OK, "a missing brain is not an error");
@@ -245,7 +239,7 @@ async fn an_unreachable_brain_falls_back_quietly() {
 #[tokio::test]
 async fn the_forecast_is_served_when_the_brain_offers_one() {
     let (base, _) = stub_brain(Behaviour::Reorder).await;
-    let app = app_with(Some(&base));
+    let app = app_with(Some(&base)).await;
 
     let (status, body) = send(&app, "/api/forecast").await;
 
@@ -257,7 +251,7 @@ async fn the_forecast_is_served_when_the_brain_offers_one() {
 
 #[tokio::test]
 async fn no_brain_means_no_forecast_rather_than_an_error() {
-    let app = app_with(None);
+    let app = app_with(None).await;
     let (status, body) = send(&app, "/api/forecast").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -266,7 +260,7 @@ async fn no_brain_means_no_forecast_rather_than_an_error() {
 
 #[tokio::test]
 async fn an_unreachable_brain_means_no_forecast() {
-    let app = app_with(Some("http://127.0.0.1:1"));
+    let app = app_with(Some("http://127.0.0.1:1")).await;
     let (status, body) = send(&app, "/api/forecast").await;
 
     assert_eq!(status, StatusCode::OK);

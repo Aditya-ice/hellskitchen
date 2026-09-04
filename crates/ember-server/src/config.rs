@@ -20,6 +20,10 @@ pub struct Config {
     /// Marks the session cookie `Secure`. Off for plain-http localhost, since a
     /// browser silently drops a `Secure` cookie sent over http.
     pub secure_cookies: bool,
+    /// Whether to believe `X-Forwarded-For`. Only true behind a proxy that
+    /// actually sets it; otherwise any client can choose its own rate-limit
+    /// identity just by sending the header.
+    pub trust_forwarded_for: bool,
     /// Base URL of the optional Python service. The POS works without it.
     pub brain_url: Option<String>,
 }
@@ -43,6 +47,7 @@ impl Default for Config {
             elevenlabs_base: "https://api.elevenlabs.io".into(),
             tavily_base: "https://api.tavily.com".into(),
             secure_cookies: false,
+            trust_forwarded_for: false,
             brain_url: None,
         }
     }
@@ -65,6 +70,9 @@ impl Config {
             secure_cookies: env("EMBER_SECURE_COOKIES")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(defaults.secure_cookies),
+            trust_forwarded_for: env("EMBER_TRUST_PROXY")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(defaults.trust_forwarded_for),
             brain_url: env("EMBER_BRAIN_URL"),
         }
     }

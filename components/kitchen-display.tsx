@@ -130,6 +130,7 @@ export function KitchenDisplay() {
                 pos.menuItems.find((item) => item.id === id)?.name ?? id
               }
               onBump={() => pos.completeOrder(order.id)}
+              busy={pos.pending > 0}
             />
           ))}
         </div>
@@ -145,6 +146,7 @@ function Ticket({
   minutes,
   nameFor,
   onBump,
+  busy,
 }: {
   order: Order;
   guest: GuestProfile | undefined;
@@ -152,6 +154,8 @@ function Ticket({
   minutes: number;
   nameFor: (menuItemId: string) => string;
   onBump: () => void;
+  /** A write is in flight; bumping again would clear an already-cleared ticket. */
+  busy: boolean;
 }) {
   const level = urgency(minutes);
 
@@ -203,9 +207,13 @@ function Ticket({
       <button
         type="button"
         onClick={onBump}
-        className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-navy py-3 text-sm font-black text-white hover:bg-navy/90"
+        // Bumping cannot be undone -- there is no un-bump action -- so this
+        // stops the second of two quick taps clearing a ticket that the first
+        // tap had already cleared.
+        disabled={busy}
+        className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-navy py-3 text-sm font-black text-white hover:bg-navy/90 disabled:bg-line disabled:text-ink-muted"
       >
-        <Check className="size-4" />
+        <Check className="size-4" aria-hidden="true" />
         Bump {tableLabel}
       </button>
     </article>

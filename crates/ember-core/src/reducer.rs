@@ -15,8 +15,23 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::domain::*;
-use crate::engine::can_seat_guest_at_table;
+use crate::engine::seating_obstacle;
 use crate::seed;
+
+/// Who performed an action, and at which screen.
+///
+/// The action log recorded what happened and never who did it, so it could not
+/// answer the one question an audit trail exists to answer. This is stamped
+/// server-side from the session and is never accepted from a client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Actor {
+    pub staff_id: String,
+    /// Which terminal: the pass and the host stand are different screens even
+    /// when the same person is signed in at both.
+    pub terminal_id: String,
+}
 
 /// An action plus the identity and timestamp assigned when it was created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -24,6 +39,12 @@ use crate::seed;
 pub struct Action {
     pub id: String,
     pub at: String,
+    /// Who performed this, stamped by the server from the session.
+    ///
+    /// `None` only for actions logged before identity existed — those genuinely
+    /// have no known actor, and inventing one would be worse than saying so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<Actor>,
     #[serde(flatten)]
     #[ts(flatten)]
     pub kind: ActionKind,
@@ -37,7 +58,11 @@ pub struct Action {
 /// at human pace, never in a hot loop.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "type", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 #[ts(export)]
 pub enum ActionKind {
     CheckIn {
@@ -153,35 +178,37 @@ fn activity(action: &Action, label: &str, detail: String) -> ActivityEvent {
 /// `new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })`
 fn clock_time(at: &str) -> String {
     match DateTime::parse_from_rfc3339(at) {
-        Ok(parsed) => parsed
-            .with_timezone(&Local)
-            .format("%-I:%M %p")
-            .to_string(),
+        Ok(parsed) => parsed.with_timezone(&Local).format("%-I:%M %p").to_string(),
         Err(_) => at.to_string(),
     }
 }
 
 /// Applies `action` to `state`.
 ///
-/// Returns `None` when the action was rejected by a guard or would not change
-/// anything, so callers can skip persisting and broadcasting a no-op.
-pub fn reduce(state: &PosState, action: &Action) -> Option<PosState> {
+/// Three outcomes, deliberately distinct:
+/// * `Ok(Some(next))` — the action changed the floor.
+/// * `Ok(None)` — it was allowed but changed nothing, so there is nothing to
+///   persist or broadcast.
+/// * `Err(rejection)` — a guard refused it, and the reason is the caller's to
+///   show. Collapsing this into `None` is what made a refused seating look
+///   identical to a click that did nothing.
+pub fn reduce(state: &PosState, action: &Action) -> Result<Option<PosState>, Rejection> {
     let next = apply(state, action)?;
     if next == *state {
-        None
+        Ok(None)
     } else {
-        Some(next)
+        Ok(Some(next))
     }
 }
 
-fn apply(state: &PosState, action: &Action) -> Option<PosState> {
+fn apply(state: &PosState, action: &Action) -> Result<PosState, Rejection> {
     let mut next = state.clone();
 
     match &action.kind {
         ActionKind::CheckIn { guest_id } => {
-            let guest = state.guest(guest_id)?;
+            let guest = state.guest(guest_id).ok_or(Rejection::UnknownGuest)?;
             if guest.status != GuestStatus::Expected {
-                return None;
+                return Err(Rejection::GuestNotExpected);
             }
             let name = guest.name.clone();
             for guest in next.guests.iter_mut().filter(|item| item.id == *guest_id) {
@@ -200,7 +227,7 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
 
         ActionKind::AddWalkIn { guest } => {
             if state.guests.iter().any(|item| item.id == guest.id) {
-                return None;
+                return Err(Rejection::GuestAlreadyPresent);
             }
             let detail = format!("{}, party of {}", guest.name, guest.party_size);
             next.guests.push(guest.clone());
@@ -215,14 +242,15 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
         }
 
         ActionKind::SeatGuest { guest_id, table_id } => {
-            let guest = state.guest(guest_id)?;
-            let target = state.table(table_id)?;
+            let guest = state.guest(guest_id).ok_or(Rejection::UnknownGuest)?;
+            let target = state.table(table_id).ok_or(Rejection::UnknownTable)?;
             let current_table_id = state.table_seating(guest_id).map(|table| table.id.clone());
 
-            if current_table_id.as_deref() == Some(target.id.as_str())
-                || !can_seat_guest_at_table(guest, target)
-            {
-                return None;
+            if current_table_id.as_deref() == Some(target.id.as_str()) {
+                return Err(Rejection::AlreadyAtThatTable);
+            }
+            if let Some(obstacle) = seating_obstacle(guest, target) {
+                return Err(obstacle);
             }
 
             let guest_name = guest.name.clone();
@@ -282,20 +310,31 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
             guest_id,
             menu_item_id,
         } => {
+            // An id the menu does not have would become a line that consumes
+            // no stock and prices at zero -- a silent hole in the check.
+            let menu = seed::menu_items();
+            let Some(listed) = menu.iter().find(|item| item.id == *menu_item_id) else {
+                return Err(Rejection::UnknownMenuItem);
+            };
             let order = next
                 .orders
                 .iter_mut()
-                .find(|order| order.guest_id == *guest_id && is_open(order))?;
+                .find(|order| order.guest_id == *guest_id && is_open(order))
+                .ok_or(Rejection::NoOpenOrder)?;
             match order
                 .lines
                 .iter_mut()
                 .find(|line| line.menu_item_id == *menu_item_id)
             {
                 Some(line) => line.quantity += 1,
+                // Capture the price and name now: a dish repriced or renamed
+                // later must not change what this check says.
                 None => order.lines.push(OrderLine {
                     menu_item_id: menu_item_id.clone(),
                     quantity: 1,
                     notes: String::new(),
+                    unit_price_cents: Some(listed.price_cents),
+                    name_snapshot: Some(listed.name.clone()),
                 }),
             }
         }
@@ -307,7 +346,8 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
             let order = next
                 .orders
                 .iter_mut()
-                .find(|order| order.guest_id == *guest_id && is_open(order))?;
+                .find(|order| order.guest_id == *guest_id && is_open(order))
+                .ok_or(Rejection::NoOpenOrder)?;
             for line in order
                 .lines
                 .iter_mut()
@@ -322,20 +362,25 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
             let order = next
                 .orders
                 .iter_mut()
-                .find(|order| order.guest_id == *guest_id && is_open(order))?;
+                .find(|order| order.guest_id == *guest_id && is_open(order))
+                .ok_or(Rejection::NoOpenOrder)?;
             order.guest_notes = notes.clone();
         }
 
         ActionKind::SendOrder { guest_id } => {
-            let guest = state.guest(guest_id)?;
+            let guest = state.guest(guest_id).ok_or(Rejection::UnknownGuest)?;
             let guest_name = guest.name.clone();
 
             let order = next
                 .orders
                 .iter_mut()
-                .find(|order| order.guest_id == *guest_id)?;
-            if !is_open(order) || order.lines.is_empty() {
-                return None;
+                .find(|order| order.guest_id == *guest_id)
+                .ok_or(Rejection::NoOpenOrder)?;
+            if !is_open(order) {
+                return Err(Rejection::OrderLocked);
+            }
+            if order.lines.is_empty() {
+                return Err(Rejection::OrderEmpty);
             }
             order.status = OrderStatus::Sent;
             order.sent_at = Some(action.at.clone());
@@ -371,10 +416,14 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
         }
 
         ActionKind::CompleteOrder { order_id } => {
-            let order = next.orders.iter_mut().find(|order| order.id == *order_id)?;
+            let order = next
+                .orders
+                .iter_mut()
+                .find(|order| order.id == *order_id)
+                .ok_or(Rejection::UnknownOrder)?;
             // Only a ticket that actually reached the kitchen can be bumped.
             if order.status != OrderStatus::Sent {
-                return None;
+                return Err(Rejection::TicketNotSent);
             }
             order.status = OrderStatus::Completed;
             order.completed_at = Some(action.at.clone());
@@ -412,13 +461,14 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
             // it corrupt the larder — NaN in particular would poison every
             // later comparison and quietly make the dish unsellable forever.
             if !quantity.is_finite() || *quantity <= 0.0 {
-                return None;
+                return Err(Rejection::InvalidQuantity);
             }
 
             let ingredient = next
                 .ingredients
                 .iter_mut()
-                .find(|item| item.id == *ingredient_id)?;
+                .find(|item| item.id == *ingredient_id)
+                .ok_or(Rejection::UnknownIngredient)?;
             ingredient.on_hand += quantity;
 
             let detail = format!(
@@ -437,17 +487,35 @@ fn apply(state: &PosState, action: &Action) -> Option<PosState> {
         }
     }
 
-    Some(next)
+    Ok(next)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// These tests were written against a reducer that answered `Option`, and
+    /// most of them are about *what changed*, not why something was refused.
+    /// This keeps that shape for them; the tests that care about the reason
+    /// call `rejection` instead.
+    fn reduce_opt(state: &PosState, action: &Action) -> Option<PosState> {
+        reduce(state, action).ok().flatten()
+    }
+
+    /// The refusal an action must have produced.
+    fn rejection(state: &PosState, action: &Action) -> Rejection {
+        match reduce(state, action) {
+            Err(reason) => reason,
+            Ok(Some(_)) => panic!("expected the action to be refused, but it changed the floor"),
+            Ok(None) => panic!("expected the action to be refused, but it was a silent no-op"),
+        }
+    }
+
     fn action(kind: ActionKind) -> Action {
         Action {
             id: "test-action".into(),
             at: "2026-08-13T10:00:00.000Z".into(),
+            actor: None,
             kind,
         }
     }
@@ -463,6 +531,250 @@ mod tests {
         })
     }
 
+    // --- refusals name their reason ---------------------------------------
+    //
+    // These are the contract the UI switches on. A refusal that arrives as a
+    // bare "nothing happened" is indistinguishable from a dropped click, which
+    // is exactly the failure these exist to prevent.
+
+    #[test]
+    fn seating_refusals_name_the_obstacle() {
+        let initial = state();
+
+        // Jordan is still "expected" — nobody has checked them in.
+        assert_eq!(
+            rejection(&initial, &seat("guest-jordan", "t7")),
+            Rejection::GuestNotReadyToSeat
+        );
+        // t3 is occupied by Noah.
+        assert_eq!(
+            rejection(&initial, &seat("guest-maya", "t3")),
+            Rejection::TableUnavailable
+        );
+        assert_eq!(
+            rejection(&initial, &seat("guest-maya", "nope")),
+            Rejection::UnknownTable
+        );
+        assert_eq!(
+            rejection(&initial, &seat("nobody", "t2")),
+            Rejection::UnknownGuest
+        );
+
+        // Seating a party where they already are is its own answer, not a
+        // generic failure: the host wants to know it already happened.
+        let seated = reduce_opt(&initial, &seat("guest-maya", "t2")).expect("seating accepted");
+        assert_eq!(
+            rejection(&seated, &seat("guest-maya", "t2")),
+            Rejection::AlreadyAtThatTable
+        );
+    }
+
+    #[test]
+    fn a_table_too_small_is_distinct_from_one_that_is_taken() {
+        let mut initial = state();
+        for guest in initial.guests.iter_mut().filter(|g| g.id == "guest-maya") {
+            guest.status = GuestStatus::Waiting;
+            guest.party_size = 99;
+        }
+        assert_eq!(
+            rejection(&initial, &seat("guest-maya", "t2")),
+            Rejection::TableTooSmall
+        );
+    }
+
+    #[test]
+    fn an_accessible_party_is_told_why_a_table_will_not_do() {
+        let mut initial = state();
+        let inaccessible = initial
+            .tables
+            .iter()
+            .find(|table| !table.accessible && table.status == TableStatus::Available)
+            .map(|table| table.id.clone())
+            .expect("the seed has an available table without step-free access");
+        for guest in initial.guests.iter_mut().filter(|g| g.id == "guest-maya") {
+            guest.status = GuestStatus::Waiting;
+            guest.party_size = 1;
+            guest.seating_preferences = vec!["accessible".into()];
+        }
+        assert_eq!(
+            rejection(&initial, &seat("guest-maya", &inaccessible)),
+            Rejection::TableNotAccessible
+        );
+    }
+
+    #[test]
+    fn check_in_refusals_name_their_reason() {
+        let initial = state();
+        // Maya is already waiting.
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::CheckIn {
+                    guest_id: "guest-maya".into()
+                })
+            ),
+            Rejection::GuestNotExpected
+        );
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::CheckIn {
+                    guest_id: "nobody".into()
+                })
+            ),
+            Rejection::UnknownGuest
+        );
+    }
+
+    #[test]
+    fn a_dish_that_is_not_on_the_menu_is_refused() {
+        // Before this was checked, an unknown id became a line that consumed no
+        // stock and priced at zero — a hole in the check that nothing surfaced.
+        let initial = state();
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::AddOrderItem {
+                    guest_id: "guest-noah".into(),
+                    menu_item_id: "not-a-dish".into(),
+                })
+            ),
+            Rejection::UnknownMenuItem
+        );
+    }
+
+    #[test]
+    fn firing_refusals_separate_an_empty_ticket_from_a_locked_one() {
+        let initial = state();
+
+        // Maya has no order at all.
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::SendOrder {
+                    guest_id: "guest-maya".into()
+                })
+            ),
+            Rejection::NoOpenOrder
+        );
+
+        // Noah's seeded draft is empty. "Nothing on it" is a different problem
+        // from "already gone to the kitchen", and the server says which.
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::SendOrder {
+                    guest_id: "guest-noah".into()
+                })
+            ),
+            Rejection::OrderEmpty
+        );
+
+        let with_line = reduce_opt(
+            &initial,
+            &action(ActionKind::AddOrderItem {
+                guest_id: "guest-noah".into(),
+                menu_item_id: "beet-salad".into(),
+            }),
+        )
+        .expect("adding a dish to an open draft is accepted");
+
+        let sent = reduce_opt(
+            &with_line,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-noah".into(),
+            }),
+        )
+        .expect("firing a draft with lines is accepted");
+
+        assert_eq!(
+            rejection(
+                &sent,
+                &action(ActionKind::SendOrder {
+                    guest_id: "guest-noah".into()
+                })
+            ),
+            Rejection::OrderLocked
+        );
+        // A fired ticket refuses edits by name, rather than ignoring them.
+        assert_eq!(
+            rejection(
+                &sent,
+                &action(ActionKind::AddOrderItem {
+                    guest_id: "guest-noah".into(),
+                    menu_item_id: "beet-salad".into(),
+                })
+            ),
+            Rejection::NoOpenOrder
+        );
+    }
+
+    #[test]
+    fn bumping_a_ticket_that_was_never_fired_is_refused_by_name() {
+        let initial = state();
+        let draft = initial
+            .orders
+            .first()
+            .map(|order| order.id.clone())
+            .expect("the seed has a draft order");
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::CompleteOrder { order_id: draft })
+            ),
+            Rejection::TicketNotSent
+        );
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::CompleteOrder {
+                    order_id: "no-such-ticket".into()
+                })
+            ),
+            Rejection::UnknownOrder
+        );
+    }
+
+    #[test]
+    fn restock_refusals_separate_a_bad_quantity_from_a_bad_ingredient() {
+        let initial = state();
+        for quantity in [0.0, -3.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                rejection(
+                    &initial,
+                    &action(ActionKind::RestockIngredient {
+                        ingredient_id: "carrot".into(),
+                        quantity,
+                    })
+                ),
+                Rejection::InvalidQuantity,
+                "a restock of {quantity} must be refused as a quantity problem"
+            );
+        }
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::RestockIngredient {
+                    ingredient_id: "unobtainium".into(),
+                    quantity: 5.0,
+                })
+            ),
+            Rejection::UnknownIngredient
+        );
+    }
+
+    #[test]
+    fn an_allowed_action_that_changes_nothing_is_not_a_refusal() {
+        // Re-saving identical notes is not an error, and must not be reported
+        // to staff as one.
+        let initial = state();
+        let same_notes = action(ActionKind::UpdateGuestNotes {
+            guest_id: "guest-maya".into(),
+            notes: initial.guest("guest-maya").unwrap().notes.clone(),
+        });
+        assert_eq!(reduce(&initial, &same_notes), Ok(None));
+    }
+
     // --- ported from components/pos-provider.test.ts ---
 
     #[test]
@@ -470,11 +782,11 @@ mod tests {
         let initial = state();
 
         // Jordan is still "expected" — not checked in, so not seatable.
-        assert!(reduce(&initial, &seat("guest-jordan", "t7")).is_none());
+        assert!(reduce_opt(&initial, &seat("guest-jordan", "t7")).is_none());
         // t3 is already occupied by Noah.
-        assert!(reduce(&initial, &seat("guest-maya", "t3")).is_none());
+        assert!(reduce_opt(&initial, &seat("guest-maya", "t3")).is_none());
 
-        let valid = reduce(&initial, &seat("guest-maya", "t2")).expect("seating accepted");
+        let valid = reduce_opt(&initial, &seat("guest-maya", "t2")).expect("seating accepted");
         let table = valid.table("t2").unwrap();
         assert_eq!(table.status, TableStatus::Occupied);
         assert_eq!(table.seated_guest_id.as_deref(), Some("guest-maya"));
@@ -483,8 +795,13 @@ mod tests {
     #[test]
     fn checks_in_expected_guests_only_once() {
         let initial = state();
-        let checked_in = reduce(&initial, &action(ActionKind::CheckIn { guest_id: "guest-jordan".into() }))
-            .expect("check-in accepted");
+        let checked_in = reduce_opt(
+            &initial,
+            &action(ActionKind::CheckIn {
+                guest_id: "guest-jordan".into(),
+            }),
+        )
+        .expect("check-in accepted");
 
         assert_eq!(
             checked_in.guest("guest-jordan").unwrap().status,
@@ -492,7 +809,7 @@ mod tests {
         );
         assert_eq!(checked_in.activity.len(), 1);
 
-        let repeated = reduce(
+        let repeated = reduce_opt(
             &checked_in,
             &action(ActionKind::CheckIn {
                 guest_id: "guest-jordan".into(),
@@ -505,8 +822,8 @@ mod tests {
     fn keeps_sent_orders_immutable() {
         // Reach "sent" through the real transition rather than fabricating it,
         // so the guards on the transition itself are exercised.
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let with_item = reduce(
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -514,7 +831,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let sent = reduce(
+        let sent = reduce_opt(
             &with_item,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -545,7 +862,7 @@ mod tests {
             },
         ] {
             assert!(
-                reduce(&sent, &action(rejected)).is_none(),
+                reduce_opt(&sent, &action(rejected)).is_none(),
                 "a sent order must reject every edit"
             );
         }
@@ -555,8 +872,8 @@ mod tests {
 
     #[test]
     fn moving_a_party_does_not_walk_back_an_order_already_in_the_kitchen() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let with_item = reduce(
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -564,7 +881,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let sent = reduce(
+        let sent = reduce_opt(
             &with_item,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -576,25 +893,32 @@ mod tests {
             GuestStatus::Ordered
         );
 
-        let moved = reduce(&sent, &seat("guest-maya", "t4")).expect("move accepted");
+        let moved = reduce_opt(&sent, &seat("guest-maya", "t4")).expect("move accepted");
 
         assert_eq!(
             moved.guest("guest-maya").unwrap().status,
             GuestStatus::Ordered,
             "guest was downgraded to Seated while their order is in the kitchen"
         );
-        assert_eq!(moved.table("t4").unwrap().seated_guest_id.as_deref(), Some("guest-maya"));
+        assert_eq!(
+            moved.table("t4").unwrap().seated_guest_id.as_deref(),
+            Some("guest-maya")
+        );
         assert_eq!(moved.table("t2").unwrap().status, TableStatus::Available);
         assert_eq!(moved.table("t2").unwrap().seated_guest_id, None);
     }
 
     #[test]
     fn an_empty_order_cannot_be_sent_to_the_kitchen() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        assert!(seated.order_for_guest("guest-maya").unwrap().lines.is_empty());
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        assert!(seated
+            .order_for_guest("guest-maya")
+            .unwrap()
+            .lines
+            .is_empty());
 
         assert!(
-            reduce(
+            reduce_opt(
                 &seated,
                 &action(ActionKind::SendOrder {
                     guest_id: "guest-maya".into()
@@ -607,8 +931,8 @@ mod tests {
 
     #[test]
     fn an_order_cannot_be_sent_twice() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let with_item = reduce(
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -616,7 +940,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let sent = reduce(
+        let sent = reduce_opt(
             &with_item,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -624,41 +948,53 @@ mod tests {
         )
         .unwrap();
 
-        let resent = reduce(
+        let resent = reduce_opt(
             &sent,
             &Action {
                 id: "second-send".into(),
                 at: "2026-08-13T10:05:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::SendOrder {
                     guest_id: "guest-maya".into(),
                 },
             },
         );
-        assert!(resent.is_none(), "re-sending must not duplicate the activity entry");
+        assert!(
+            resent.is_none(),
+            "re-sending must not duplicate the activity entry"
+        );
     }
 
     #[test]
     fn seating_creates_an_order_and_moving_reuses_it() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         assert_eq!(
-            seated.orders.iter().filter(|o| o.guest_id == "guest-maya").count(),
+            seated
+                .orders
+                .iter()
+                .filter(|o| o.guest_id == "guest-maya")
+                .count(),
             1
         );
 
-        let moved = reduce(&seated, &seat("guest-maya", "t4")).unwrap();
+        let moved = reduce_opt(&seated, &seat("guest-maya", "t4")).unwrap();
         let orders: Vec<_> = moved
             .orders
             .iter()
             .filter(|order| order.guest_id == "guest-maya")
             .collect();
-        assert_eq!(orders.len(), 1, "moving a party must not open a second order");
+        assert_eq!(
+            orders.len(),
+            1,
+            "moving a party must not open a second order"
+        );
         assert_eq!(orders[0].table_id.as_deref(), Some("t4"));
     }
 
     #[test]
     fn removing_the_last_unit_drops_the_line() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let with_item = reduce(
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -666,7 +1002,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let removed = reduce(
+        let removed = reduce_opt(
             &with_item,
             &action(ActionKind::RemoveOrderItem {
                 guest_id: "guest-maya".into(),
@@ -675,7 +1011,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(removed.order_for_guest("guest-maya").unwrap().lines.is_empty());
+        assert!(removed
+            .order_for_guest("guest-maya")
+            .unwrap()
+            .lines
+            .is_empty());
     }
 
     #[test]
@@ -697,7 +1037,7 @@ mod tests {
             notes: "Walk-in guest".into(),
         };
 
-        let added = reduce(
+        let added = reduce_opt(
             &state(),
             &action(ActionKind::AddWalkIn {
                 guest: walk_in.clone(),
@@ -707,14 +1047,14 @@ mod tests {
         assert_eq!(added.guests.len(), seed::guests().len() + 1);
 
         assert!(
-            reduce(&added, &action(ActionKind::AddWalkIn { guest: walk_in })).is_none(),
+            reduce_opt(&added, &action(ActionKind::AddWalkIn { guest: walk_in })).is_none(),
             "the same walk-in must not be added twice"
         );
     }
 
     fn fired_ticket() -> PosState {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let with_item = reduce(
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -722,7 +1062,7 @@ mod tests {
             }),
         )
         .unwrap();
-        reduce(
+        reduce_opt(
             &with_item,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -732,11 +1072,12 @@ mod tests {
     }
 
     fn complete(state: &PosState, order_id: &str, id: &str) -> Option<PosState> {
-        reduce(
+        reduce_opt(
             state,
             &Action {
                 id: id.into(),
                 at: "2026-08-13T10:30:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::CompleteOrder {
                     order_id: order_id.into(),
                 },
@@ -753,9 +1094,16 @@ mod tests {
         let order = bumped.order_for_guest("guest-maya").unwrap();
 
         assert_eq!(order.status, OrderStatus::Completed);
-        assert_eq!(order.completed_at.as_deref(), Some("2026-08-13T10:30:00.000Z"));
+        assert_eq!(
+            order.completed_at.as_deref(),
+            Some("2026-08-13T10:30:00.000Z")
+        );
         assert_eq!(bumped.activity[0].action, "Ticket completed");
-        assert!(bumped.activity[0].detail.contains("T2"), "{:?}", bumped.activity[0]);
+        assert!(
+            bumped.activity[0].detail.contains("T2"),
+            "{:?}",
+            bumped.activity[0]
+        );
     }
 
     #[test]
@@ -790,7 +1138,7 @@ mod tests {
     #[test]
     fn a_draft_order_cannot_be_bumped() {
         // Seating opens a draft. Nothing has reached the kitchen to bump.
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         let order_id = seated.order_for_guest("guest-maya").unwrap().id.clone();
 
         assert!(complete(&seated, &order_id, "b1").is_none());
@@ -827,7 +1175,7 @@ mod tests {
             },
         ] {
             assert!(
-                reduce(&bumped, &action(rejected)).is_none(),
+                reduce_opt(&bumped, &action(rejected)).is_none(),
                 "a completed order must reject every edit"
             );
         }
@@ -841,9 +1189,9 @@ mod tests {
 
     #[test]
     fn firing_a_ticket_consumes_its_ingredients() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         // Cedar Salmon uses salmon and carrot.
-        let with_item = reduce(
+        let with_item = reduce_opt(
             &seated,
             &action(ActionKind::AddOrderItem {
                 guest_id: "guest-maya".into(),
@@ -852,10 +1200,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(on_hand(&with_item, "salmon"), 24.0, "a draft consumes nothing");
+        assert_eq!(
+            on_hand(&with_item, "salmon"),
+            24.0,
+            "a draft consumes nothing"
+        );
         assert_eq!(on_hand(&with_item, "carrot"), 3.0);
 
-        let sent = reduce(
+        let sent = reduce_opt(
             &with_item,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -871,14 +1223,15 @@ mod tests {
 
     #[test]
     fn quantity_scales_consumption() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         let mut state = seated;
         for id in ["a", "b", "c"] {
-            state = reduce(
+            state = reduce_opt(
                 &state,
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "beet-salad".into(),
@@ -892,28 +1245,33 @@ mod tests {
             3
         );
 
-        let sent = reduce(
+        let sent = reduce_opt(
             &state,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
             }),
         )
         .unwrap();
-        assert_eq!(on_hand(&sent, "beet"), 13.0, "16 on hand less three servings");
+        assert_eq!(
+            on_hand(&sent, "beet"),
+            13.0,
+            "16 on hand less three servings"
+        );
     }
 
     #[test]
     fn a_dish_becomes_ineligible_once_its_stock_runs_out() {
         // Carrots start at 3. Three carrot dishes exhaust them, and the
         // engine must then refuse anything else that needs one.
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         let mut state = seated;
         for id in ["a", "b", "c"] {
-            state = reduce(
+            state = reduce_opt(
                 &state,
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),
@@ -922,7 +1280,7 @@ mod tests {
             )
             .unwrap();
         }
-        let sent = reduce(
+        let sent = reduce_opt(
             &state,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -936,7 +1294,10 @@ mod tests {
         let dishes = crate::engine::recommend_dishes(guest, &seed::menu_items(), &sent.ingredients);
         let salmon = dishes.iter().find(|d| d.id == "salmon-carrot").unwrap();
 
-        assert!(!salmon.eligible, "a dish with no carrots left cannot be sold");
+        assert!(
+            !salmon.eligible,
+            "a dish with no carrots left cannot be sold"
+        );
         assert!(salmon
             .warnings
             .iter()
@@ -945,15 +1306,16 @@ mod tests {
 
     #[test]
     fn stock_never_goes_negative() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         let mut state = seated;
         // Ten servings against three carrots on hand.
         for index in 0..10 {
-            state = reduce(
+            state = reduce_opt(
                 &state,
                 &Action {
                     id: format!("a{index}"),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),
@@ -962,7 +1324,7 @@ mod tests {
             )
             .unwrap();
         }
-        let sent = reduce(
+        let sent = reduce_opt(
             &state,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -988,18 +1350,19 @@ mod tests {
         let sent = fired_ticket();
         assert_ne!(on_hand(&sent, "beet"), 16.0);
 
-        let reset = reduce(&sent, &action(ActionKind::Reset)).unwrap();
+        let reset = reduce_opt(&sent, &action(ActionKind::Reset)).unwrap();
         assert_eq!(on_hand(&reset, "beet"), 16.0);
     }
 
     // --- restocking ---
 
     fn restock(state: &PosState, id: &str, quantity: f64, action_id: &str) -> Option<PosState> {
-        reduce(
+        reduce_opt(
             state,
             &Action {
                 id: action_id.into(),
                 at: "2026-08-13T11:00:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::RestockIngredient {
                     ingredient_id: id.into(),
                     quantity,
@@ -1035,14 +1398,15 @@ mod tests {
     fn restocking_brings_a_sold_out_dish_back() {
         // Exhaust carrots, then book a delivery in and confirm the engine
         // sells the dish again.
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
         let mut state = seated;
         for id in ["a", "b", "c"] {
-            state = reduce(
+            state = reduce_opt(
                 &state,
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),
@@ -1051,7 +1415,7 @@ mod tests {
             )
             .unwrap();
         }
-        let sent = reduce(
+        let sent = reduce_opt(
             &state,
             &action(ActionKind::SendOrder {
                 guest_id: "guest-maya".into(),
@@ -1060,9 +1424,18 @@ mod tests {
         .unwrap();
         assert_eq!(on_hand(&sent, "carrot"), 0.0);
 
-        let dishes_before =
-            crate::engine::recommend_dishes(sent.guest("guest-maya").unwrap(), &seed::menu_items(), &sent.ingredients);
-        assert!(!dishes_before.iter().find(|d| d.id == "salmon-carrot").unwrap().eligible);
+        let dishes_before = crate::engine::recommend_dishes(
+            sent.guest("guest-maya").unwrap(),
+            &seed::menu_items(),
+            &sent.ingredients,
+        );
+        assert!(
+            !dishes_before
+                .iter()
+                .find(|d| d.id == "salmon-carrot")
+                .unwrap()
+                .eligible
+        );
 
         let restocked = restock(&sent, "carrot", 18.0, "r1").unwrap();
         let dishes_after = crate::engine::recommend_dishes(
@@ -1070,7 +1443,10 @@ mod tests {
             &seed::menu_items(),
             &restocked.ingredients,
         );
-        let salmon = dishes_after.iter().find(|d| d.id == "salmon-carrot").unwrap();
+        let salmon = dishes_after
+            .iter()
+            .find(|d| d.id == "salmon-carrot")
+            .unwrap();
 
         assert!(salmon.eligible, "a restocked dish must be sellable again");
         assert!(
@@ -1118,8 +1494,8 @@ mod tests {
 
     #[test]
     fn reset_restores_the_seeded_service() {
-        let seated = reduce(&state(), &seat("guest-maya", "t2")).unwrap();
-        let reset = reduce(&seated, &action(ActionKind::Reset)).expect("reset applied");
+        let seated = reduce_opt(&state(), &seat("guest-maya", "t2")).unwrap();
+        let reset = reduce_opt(&seated, &action(ActionKind::Reset)).expect("reset applied");
         assert_eq!(reset, seed::initial_state());
     }
 

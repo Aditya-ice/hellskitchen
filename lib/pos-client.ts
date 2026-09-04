@@ -14,8 +14,10 @@ import type { GuestProfile } from "@/lib/generated/GuestProfile";
 import type { MenuItem } from "@/lib/generated/MenuItem";
 import type { PosState } from "@/lib/generated/PosState";
 import type { Recommendation } from "@/lib/generated/Recommendation";
+import type { Rejection } from "@/lib/generated/Rejection";
 import type { Restaurant } from "@/lib/generated/Restaurant";
 import type { StaffMember } from "@/lib/generated/StaffMember";
+import type { StaffRole } from "@/lib/generated/StaffRole";
 
 declare global {
   interface Window {
@@ -57,7 +59,8 @@ export interface RecommendationPayload {
   tables: Recommendation[];
   dishes: Recommendation[];
   estimateWait: number;
-  orderTotal: number;
+  /** Subtotal in minor units. */
+  orderTotalCents: number;
   /** Which ranking this actually is — the brain may be absent or unhelpful. */
   rankedBy: "engine" | "model";
 }
@@ -100,14 +103,32 @@ export interface FloorSummary {
 }
 
 export interface ActionOutcome extends Revision {
-  outcome: "changed" | "rejected" | "duplicate";
+  /**
+   * `changed` moved the floor. `unchanged` was allowed but altered nothing.
+   * `duplicate` was already applied — a retry, not a second seating.
+   * `rejected` was refused by a guard, and `reason` says which.
+   */
+  outcome: "changed" | "unchanged" | "rejected" | "duplicate";
+  /** Set only when `outcome` is `rejected`. Switch on this, not the message. */
+  reason?: Rejection;
+  /** Server-supplied fallback text, for a reason this client has no copy for. */
+  reasonMessage?: string;
 }
 
 async function readJson<T>(response: Response, what: string): Promise<T> {
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
       error?: string;
+      code?: string;
     } | null;
+
+    // Only the session guard's own 401 means "this terminal is signed out".
+    // Keying on the status alone swallowed the message from a *wrong PIN*,
+    // which is also a 401 — so someone mistyping their PIN was told "this
+    // terminal is not signed in" and got no warning before the lockout.
+    if (response.status === 401 && body?.code === "not-authenticated") {
+      throw new NotAuthenticatedError();
+    }
     throw new Error(body?.error ?? `Could not ${what} (HTTP ${response.status}).`);
   }
   return (await response.json()) as T;
@@ -166,7 +187,6 @@ export async function askFloorAgent(
   question: string,
   signal?: AbortSignal,
 ): Promise<AgentAnswer> {
-  await ensureDemoSession();
   const response = await fetch(apiUrl("/api/agent/ask"), {
     method: "POST",
     credentials: "include",
@@ -177,7 +197,9 @@ export async function askFloorAgent(
   return readJson<AgentAnswer>(response, "ask the floor agent");
 }
 
-export async function postAction(action: Action): Promise<ActionOutcome> {
+export async function postAction(
+  action: ActionInput & ActionRequest,
+): Promise<ActionOutcome> {
   const response = await fetch(apiUrl("/api/actions"), {
     method: "POST",
     credentials: "include",
@@ -218,6 +240,38 @@ export function subscribeToState(handlers: {
 }
 
 /**
+ * A random id that also works over plain http.
+ *
+ * `crypto.randomUUID` is only available in a secure context, so on a phone
+ * reaching the POS over `http://192.168.x.x` -- the surface this module's
+ * header advertises -- it throws on every single action. `getRandomValues` has
+ * no such restriction.
+ */
+function randomId(): string {
+  if (typeof crypto !== "undefined") {
+    if ("randomUUID" in crypto) {
+      try {
+        return crypto.randomUUID();
+      } catch {
+        // Not a secure context. Fall through to getRandomValues, which has no
+        // such restriction.
+      }
+    }
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
+  }
+
+  // No crypto global at all. Reaching for it anyway — as the previous version
+  // did in this branch — throws a ReferenceError on every single tap, which is
+  // worse than a weaker id: these only have to be unique enough for the server
+  // to dedupe a retry.
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 14)}`;
+}
+
+/**
  * `Omit` does not distribute over a union: `Omit<Action, "id" | "at">` collapses
  * to the properties every member shares, which is just `type`. Distributing it
  * first keeps each variant's own fields, so a malformed action is a type error.
@@ -226,19 +280,29 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
   ? Omit<T, K>
   : never;
 
-export type ActionInput = DistributiveOmit<Action, "id" | "at">;
+export type ActionInput = DistributiveOmit<Action, "id" | "at" | "actor">;
 
-/** Builds an action with the identity the server dedupes on. */
+/**
+ * What a client sends: the action, plus the id the server dedupes on.
+ *
+ * No `at` and no `actor`. The server stamps both — the time from its own clock,
+ * the actor from the session — so neither is ours to claim.
+ */
+export interface ActionRequest {
+  id: string;
+}
+
+/** Builds an action request with the identity the server dedupes on. */
 export function newAction(
   kind: ActionInput,
-  id: string = crypto.randomUUID(),
-): Action {
-  return { ...kind, id, at: new Date().toISOString() } as Action;
+  id: string = randomId(),
+): ActionInput & ActionRequest {
+  return { ...kind, id };
 }
 
 export function newWalkIn(name: string, partySize: number): GuestProfile {
   return {
-    id: `guest-${crypto.randomUUID()}`,
+    id: `guest-${randomId()}`,
     name,
     partySize,
     reservationTime: null,
@@ -258,30 +322,90 @@ export function newWalkIn(name: string, partySize: number): GuestProfile {
   };
 }
 
-// --- demo session ---------------------------------------------------------
+// --- identity -------------------------------------------------------------
 
-let sessionPromise: Promise<void> | null = null;
+export interface Identity {
+  staffId: string;
+  name: string;
+  role: StaffRole;
+  terminalId: string;
+}
+
+export interface AuthState {
+  authenticated: boolean;
+  identity?: Identity;
+  /** True on a terminal where nobody has a PIN yet, so there is nothing to sign in to. */
+  needsSetup?: boolean;
+}
 
 /**
- * Sponsor routes require a session cookie. Requested once per page load and
- * retried on failure.
+ * Thrown when the server says this terminal is not signed in.
+ *
+ * A distinct type so the provider can drop straight to the sign-in screen
+ * rather than showing "something went wrong" for what is really just a session
+ * that timed out between tables.
  */
-export function ensureDemoSession(): Promise<void> {
-  if (!sessionPromise) {
-    sessionPromise = fetch(apiUrl("/api/demo-session"), {
+export class NotAuthenticatedError extends Error {
+  constructor() {
+    super("This terminal is not signed in.");
+    this.name = "NotAuthenticatedError";
+  }
+}
+
+export async function fetchIdentity(signal?: AbortSignal): Promise<AuthState> {
+  const response = await fetch(apiUrl("/api/auth/me"), {
+    credentials: "include",
+    signal,
+  });
+  return readJson<AuthState>(response, "check who is signed in");
+}
+
+export async function login(
+  staffId: string,
+  pin: string,
+  terminalId: string,
+): Promise<Identity | undefined> {
+  const response = await fetch(apiUrl("/api/auth/login"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ staffId, pin, terminalId }),
+  });
+  const body = await readJson<{ identity?: Identity }>(response, "sign in");
+  return body.identity;
+}
+
+export async function logout(): Promise<void> {
+  await fetch(apiUrl("/api/auth/logout"), {
+    method: "POST",
+    credentials: "include",
+  });
+}
+
+/** Manager-only: issues or resets a colleague's PIN. */
+export async function setStaffPin(staffId: string, pin: string): Promise<void> {
+  const response = await fetch(
+    apiUrl(`/api/auth/staff/${encodeURIComponent(staffId)}/pin`),
+    {
       method: "POST",
       credentials: "include",
-    }).then(async (response) => {
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(body?.error ?? "Unable to start the demo session.");
-      }
-    });
-    sessionPromise.catch(() => {
-      sessionPromise = null;
-    });
-  }
-  return sessionPromise;
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin }),
+    },
+  );
+  await readJson<unknown>(response, "set that PIN");
+}
+
+/** First run only: the server refuses this once any PIN exists. */
+export async function setupFirstManager(
+  staffId: string,
+  pin: string,
+): Promise<void> {
+  const response = await fetch(apiUrl("/api/auth/setup"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ staffId, pin }),
+  });
+  await readJson<unknown>(response, "set the first PIN");
 }
