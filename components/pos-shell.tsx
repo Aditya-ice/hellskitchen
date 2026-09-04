@@ -32,6 +32,7 @@ import { VoiceInput } from "@/components/voice-input";
 import { FloorAgent } from "@/components/floor-agent";
 import { GuestTools } from "@/components/guest-tools";
 import { LarderPanel } from "@/components/larder-panel";
+import { StaffPins } from "@/components/staff-pins";
 import { useTodayLabel } from "@/lib/clock";
 import { onDesktopTabChange } from "@/lib/desktop";
 import { isLockedOrder, orderStageLabel } from "@/lib/orders";
@@ -184,6 +185,7 @@ export function PosShell() {
             )}
             <FloorAgent />
             <GuestTools />
+            <StaffPins />
             {/* Who the floor is recording actions against. This replaced a
                 "Reset demo" button that wiped the entire service on one click,
                 with no confirmation, sitting in the same row as the tools

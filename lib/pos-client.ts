@@ -116,11 +116,19 @@ export interface ActionOutcome extends Revision {
 }
 
 async function readJson<T>(response: Response, what: string): Promise<T> {
-  if (response.status === 401) throw new NotAuthenticatedError();
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
       error?: string;
+      code?: string;
     } | null;
+
+    // Only the session guard's own 401 means "this terminal is signed out".
+    // Keying on the status alone swallowed the message from a *wrong PIN*,
+    // which is also a 401 — so someone mistyping their PIN was told "this
+    // terminal is not signed in" and got no warning before the lockout.
+    if (response.status === 401 && body?.code === "not-authenticated") {
+      throw new NotAuthenticatedError();
+    }
     throw new Error(body?.error ?? `Could not ${what} (HTTP ${response.status}).`);
   }
   return (await response.json()) as T;
@@ -240,16 +248,27 @@ export function subscribeToState(handlers: {
  * no such restriction.
  */
 function randomId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    try {
-      return crypto.randomUUID();
-    } catch {
-      // Falls through to the bytes below.
+  if (typeof crypto !== "undefined") {
+    if ("randomUUID" in crypto) {
+      try {
+        return crypto.randomUUID();
+      } catch {
+        // Not a secure context. Fall through to getRandomValues, which has no
+        // such restriction.
+      }
     }
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
   }
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+  // No crypto global at all. Reaching for it anyway — as the previous version
+  // did in this branch — throws a ReferenceError on every single tap, which is
+  // worse than a weaker id: these only have to be unique enough for the server
+  // to dedupe a retry.
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 14)}`;
 }
 
 /**
@@ -361,6 +380,20 @@ export async function logout(): Promise<void> {
     method: "POST",
     credentials: "include",
   });
+}
+
+/** Manager-only: issues or resets a colleague's PIN. */
+export async function setStaffPin(staffId: string, pin: string): Promise<void> {
+  const response = await fetch(
+    apiUrl(`/api/auth/staff/${encodeURIComponent(staffId)}/pin`),
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin }),
+    },
+  );
+  await readJson<unknown>(response, "set that PIN");
 }
 
 /** First run only: the server refuses this once any PIN exists. */

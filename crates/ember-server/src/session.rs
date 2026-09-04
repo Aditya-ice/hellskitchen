@@ -63,6 +63,26 @@ impl FromRequestParts<Shared> for CurrentSession {
     }
 }
 
+/// The socket address the request arrived on, when there is one.
+///
+/// `ConnectInfo` itself is not an optional extractor, and a router driven
+/// in-process by the tests has no peer at all — so this reads the extension
+/// directly and answers `None` rather than rejecting the request.
+pub struct PeerAddr(pub Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for PeerAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
+
 /// Reads one cookie out of the `Cookie` header.
 pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers

@@ -137,9 +137,33 @@ impl RateLimiter {
         limit: usize,
         window: Duration,
     ) -> Result<(), Rejection> {
+        self.check_peer(headers, scope, None, trust_forwarded_for, limit, window)
+    }
+
+    /// As `check`, but falls back to the socket's peer address when there is no
+    /// proxy header and no session cookie to identify the caller by.
+    ///
+    /// Needed for sign-in, which by definition runs before any cookie exists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_peer(
+        &self,
+        headers: &HeaderMap,
+        scope: &str,
+        peer: Option<std::net::IpAddr>,
+        trust_forwarded_for: bool,
+        limit: usize,
+        window: Duration,
+    ) -> Result<(), Rejection> {
+        let forwarded = client_ip(headers, trust_forwarded_for);
+        let caller = match (forwarded, peer) {
+            // A proxy header we are configured to believe wins; otherwise the
+            // socket is the only identity nobody can forge.
+            ("direct", Some(address)) => address.to_string(),
+            (value, _) => value.to_string(),
+        };
         let identity = format!(
             "{}:{}",
-            client_ip(headers, trust_forwarded_for),
+            caller,
             crate::session::session_cookie(headers).unwrap_or("anonymous")
         );
         let key = format!("{scope}:{identity}");

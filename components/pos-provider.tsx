@@ -235,22 +235,33 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   // Guards against an in-flight POST response landing after a newer SSE frame.
   const version = useRef(-1);
 
-  const applyRevision = useCallback((next: Revision) => {
-    // A version that went *backwards* means this is a different service, not a
-    // stale frame — a redeployed or recreated database restarts at 0. Holding
-    // the old high-water mark there would make the client ignore every future
-    // revision while still showing itself as live.
-    if (next.version < version.current) {
+  /**
+   * Adopts a revision, if it is one we should adopt.
+   *
+   * The two sources need different rules, and conflating them causes one bug
+   * or the other:
+   *
+   * `stream` is the live, ordered feed. A version going *backwards* on it means
+   * a different service — a redeployed or recreated database restarts at 0 —
+   * so it has to be adopted. Refusing it leaves the client silently ignoring
+   * every future revision while still showing itself as live.
+   *
+   * `response` is the reply to our own POST, and can land after a newer frame
+   * has already arrived on the stream. Adopting a lower version there rewinds
+   * the mirror and hides another terminal's change until the next broadcast,
+   * so it must only ever move forward.
+   */
+  const applyRevision = useCallback(
+    (next: Revision, source: "stream" | "response") => {
+      if (source === "response" && next.version <= version.current) return;
+      if (source === "stream" && next.version === version.current) return;
+
       version.current = next.version;
       setRevision(next);
       setHydrated(true);
-      return;
-    }
-    if (next.version === version.current) return;
-    version.current = next.version;
-    setRevision(next);
-    setHydrated(true);
-  }, []);
+    },
+    [],
+  );
 
   // Reference data changes rarely, but a single failed attempt used to leave
   // the app with an empty menu and no staff for the rest of the service, so
@@ -325,9 +336,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   // and keeps us live. No separate initial fetch is needed.
   useEffect(() => {
     return subscribeToState({
-      onRevision: (next) => {
-        applyRevision(next);
-      },
+      onRevision: (next) => applyRevision(next, "stream"),
       onConnectedChange: setConnected,
     });
   }, [applyRevision]);
@@ -410,7 +419,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       setPending((n) => n + 1);
       postAction(action)
         .then((outcome) => {
-          applyRevision(outcome);
+          applyRevision(outcome, "response");
           // The server answers 200 for a refusal — it is a normal outcome of a
           // busy floor, not a transport failure. Reading only the revision, as
           // this used to, meant a refused seating looked exactly like a click

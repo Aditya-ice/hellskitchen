@@ -97,6 +97,10 @@ impl Store {
             .to_string();
 
         let connection = self.lock()?;
+        // The urgent reason to change a PIN is that someone saw it typed. That
+        // is exactly the case where the sessions it already opened must die
+        // with it, rather than idling out over the next half hour.
+        connection.execute("DELETE FROM sessions WHERE staff_id = ?1", [staff_id])?;
         connection.execute(
             "INSERT INTO staff_credentials (staff_id, pin_hash, failed_count, locked_until, updated_at)
              VALUES (?1, ?2, 0, NULL, ?3)
@@ -149,6 +153,7 @@ impl Store {
             return Ok(AuthOutcome::UnknownStaff);
         };
 
+        let mut failed_count = failed_count;
         if let Some(until) = locked_until
             .as_deref()
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -157,6 +162,15 @@ impl Store {
             if until > now {
                 return Ok(AuthOutcome::LockedOut { until });
             }
+            // The lockout has lapsed. Clear the count that caused it, or the
+            // next single typo reaches the threshold again and re-locks
+            // immediately, with no warning -- repeatable indefinitely, so one
+            // mistake earlier in the night keeps costing someone the floor.
+            connection.execute(
+                "UPDATE staff_credentials SET failed_count = 0, locked_until = NULL WHERE staff_id = ?1",
+                [staff_id],
+            )?;
+            failed_count = 0;
         }
 
         let parsed = PasswordHash::new(&pin_hash).map_err(|_| StoreError::PasswordHash)?;
@@ -188,6 +202,16 @@ impl Store {
         connection.execute(
             "UPDATE staff_credentials SET failed_count = 0, locked_until = NULL WHERE staff_id = ?1",
             [staff_id],
+        )?;
+
+        // Opportunistic, and the natural moment for it: sign-in is rare, and
+        // without this the table gains a permanent row per session for the life
+        // of the venue. An expired row is only ever deleted by presenting that
+        // same token again, which an abandoned terminal by definition never
+        // does.
+        connection.execute(
+            "DELETE FROM sessions WHERE expires_at <= ?1",
+            [now.to_rfc3339()],
         )?;
 
         let token = new_token();
@@ -424,6 +448,82 @@ mod tests {
                 attempts_remaining: MAX_FAILED_ATTEMPTS - 1
             }
         );
+    }
+
+    #[test]
+    fn a_lapsed_lockout_does_not_re_lock_on_the_very_next_typo() {
+        let store = store_with_pin("2468");
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            store
+                .authenticate("server-1", "0000", "pass-1", now())
+                .unwrap();
+        }
+
+        let later = now() + Duration::minutes(LOCKOUT_MINUTES + 1);
+
+        // The count that caused the lockout has to be cleared with it.
+        // Otherwise this single typo is failure number six, trips the
+        // threshold again straight away, and takes the server off the floor
+        // for another five minutes with no warning -- repeatable forever.
+        assert_eq!(
+            store
+                .authenticate("server-1", "0000", "pass-1", later)
+                .unwrap(),
+            AuthOutcome::WrongPin {
+                attempts_remaining: MAX_FAILED_ATTEMPTS - 1
+            }
+        );
+
+        // And the real PIN still works right after that typo.
+        let (_, session) = granted(
+            store
+                .authenticate("server-1", "2468", "pass-1", later)
+                .unwrap(),
+        );
+        assert_eq!(session.staff_id, "server-1");
+    }
+
+    #[test]
+    fn changing_a_pin_revokes_the_sessions_it_opened() {
+        let store = store_with_pin("2468");
+        let (token, _) = granted(
+            store
+                .authenticate("server-1", "2468", "pass-1", now())
+                .unwrap(),
+        );
+        assert!(store.session(&token, now()).unwrap().is_some());
+
+        // A PIN is changed in a hurry because someone watched it being typed.
+        // Leaving the session it already opened alive for another half hour
+        // defeats the point of changing it.
+        store.set_staff_pin("server-1", "1357", now()).unwrap();
+        assert!(store.session(&token, now()).unwrap().is_none());
+    }
+
+    #[test]
+    fn signing_in_clears_out_expired_sessions() {
+        let store = store_with_pin("2468");
+        granted(
+            store
+                .authenticate("server-1", "2468", "pass-1", now())
+                .unwrap(),
+        );
+
+        let later = now() + Duration::minutes(SESSION_IDLE_MINUTES + 1);
+        granted(
+            store
+                .authenticate("server-1", "2468", "pass-2", later)
+                .unwrap(),
+        );
+
+        // Only the live one is left: an expired row is otherwise deleted only
+        // by presenting that same token again, which an abandoned terminal
+        // never does, so the table would grow for the life of the venue.
+        let connection = store.lock().unwrap();
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]

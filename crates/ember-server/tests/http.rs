@@ -563,6 +563,99 @@ async fn a_manager_can_do_it() {
     assert_eq!(body["outcome"], "unchanged");
 }
 
+#[tokio::test]
+async fn a_manager_can_put_a_colleague_on_the_floor() {
+    let app = app().await;
+
+    // Without this route the bootstrap was the only way a PIN could ever be
+    // set, so exactly one person could sign in and every action in the audit
+    // trail carried their name.
+    let (status, _) = send(
+        &app,
+        post("/api/auth/staff/server-1/pin", json!({ "pin": "135791" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(post(
+            "/api/auth/login",
+            json!({ "staffId": "server-1", "pin": "135791", "terminalId": "bar" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_server_cannot_set_anyones_pin() {
+    let app = common::signed_in_as(ember_server::Config::default(), "server-1", "135791").await;
+
+    let (status, _) = app
+        .send(post(
+            "/api/auth/staff/manager-1/pin",
+            json!({ "pin": "999999" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_pin_cannot_be_set_for_someone_not_on_the_roster() {
+    let app = app().await;
+    let (status, _) = send(
+        &app,
+        post("/api/auth/staff/nobody/pin", json!({ "pin": "135791" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_wrong_pin_and_an_unknown_staff_id_are_indistinguishable() {
+    let app = app().await;
+
+    let wrong = app
+        .send_anonymous(post(
+            "/api/auth/login",
+            json!({ "staffId": common::STAFF_ID, "pin": "000000" }),
+        ))
+        .await;
+    let unknown = app
+        .send_anonymous(post(
+            "/api/auth/login",
+            json!({ "staffId": "not-a-person", "pin": "000000" }),
+        ))
+        .await;
+
+    // The remaining-attempts count used to be appended to one and not the
+    // other, so one guess per candidate id sorted real staff from invented.
+    assert_eq!(wrong.0, unknown.0);
+    assert_eq!(wrong.1["error"], unknown.1["error"]);
+}
+
+#[tokio::test]
+async fn a_session_rejection_is_marked_so_a_client_can_tell_it_from_a_bad_pin() {
+    let app = app().await;
+
+    let session = app.send_anonymous(get("/api/state")).await;
+    assert_eq!(session.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(session.1["code"], "not-authenticated");
+
+    // Both are 401. Only one means "this terminal is signed out", and a client
+    // that cannot tell them apart shows the wrong message for a mistyped PIN.
+    let pin = app
+        .send_anonymous(post(
+            "/api/auth/login",
+            json!({ "staffId": common::STAFF_ID, "pin": "000000" }),
+        ))
+        .await;
+    assert_eq!(pin.0, StatusCode::UNAUTHORIZED);
+    assert!(pin.1["code"].is_null());
+}
+
 // --- sponsor guards over HTTP ---------------------------------------------
 
 #[tokio::test]

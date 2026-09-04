@@ -27,7 +27,7 @@ use ember_store::auth::AuthOutcome;
 use ember_store::{Applied, Revision, Store};
 use futures::stream::Stream;
 
-use crate::session::CurrentSession;
+use crate::session::{CurrentSession, PeerAddr};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -93,6 +93,7 @@ pub fn router(state: Shared) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/setup", post(auth_setup))
+        .route("/api/auth/staff/{staff_id}/pin", post(auth_set_pin))
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
@@ -257,8 +258,67 @@ async fn auth_setup(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "ok": true }))).into_response())
 }
 
+/// Issues or resets a staff member's PIN. Managers only.
+///
+/// Without this, `auth_setup` was the only caller of `set_staff_pin` and it
+/// refuses to run once any credential exists — so exactly one person could ever
+/// sign in, every action in the audit trail carried their name, and a colleague
+/// who locked themselves out had no way back. The sign-in screen's promise that
+/// a manager "can add everyone else" had nothing behind it.
+async fn auth_set_pin(
+    State(state): State<Shared>,
+    CurrentSession(session): CurrentSession,
+    headers: HeaderMap,
+    Path(staff_id): Path<String>,
+    payload: Option<Json<NewPin>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    guard::require_same_origin(&headers).map_err(|rejection| {
+        ApiError(
+            rejection.status(),
+            "Cross-site requests are not allowed.".into(),
+        )
+    })?;
+
+    if role_of(&session.staff_id) != Some(StaffRole::Manager) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Only a manager can set a PIN.".into(),
+        ));
+    }
+
+    let Json(body) =
+        payload.ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Expected a PIN.".into()))?;
+
+    if role_of(&staff_id).is_none() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Nobody on the roster has that staff id.".into(),
+        ));
+    }
+
+    state
+        .store
+        .set_staff_pin(&staff_id, &body.pin, Utc::now())
+        .map_err(|error| match error {
+            ember_store::StoreError::WeakPin => ApiError(
+                StatusCode::BAD_REQUEST,
+                "A PIN must be 4 to 12 digits.".into(),
+            ),
+            other => ApiError(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct NewPin {
+    pin: String,
+}
+
 async fn auth_login(
     State(state): State<Shared>,
+    // Optional so the in-process test router, which has no peer, still works.
+    PeerAddr(peer): PeerAddr,
     headers: HeaderMap,
     payload: Option<Json<Credentials>>,
 ) -> ApiResult<Response> {
@@ -278,13 +338,26 @@ async fn auth_login(
 
     // Rate-limited by IP as well as by the per-account lockout: the lockout
     // stops an attack on one account, this stops one sweeping the roster.
+    // Keyed on the caller, not on a constant. With no proxy configured
+    // `client_ip` returns a fixed string and an unauthenticated request has no
+    // cookie, so every sign-in in the building shared one bucket: ten attempts
+    // a minute for the whole venue, and anyone who could reach the port could
+    // lock every terminal out of signing in for a whole service.
+    //
+    // The ceiling is deliberately loose. Brute force is the per-account
+    // lockout's job, not this one; what this stops is CPU exhaustion, since
+    // every attempt costs an Argon2id hash. A shared terminal sees several
+    // people sign in within a minute at a shift change, some of them
+    // mistyping, and refusing them the floor would be a worse failure than the
+    // one being guarded against.
     state
         .limiter
-        .check(
+        .check_peer(
             &headers,
             "auth-login",
+            peer.map(|address| address.ip()),
             state.config.trust_forwarded_for,
-            10,
+            30,
             Duration::from_secs(60),
         )
         .map_err(|rejection| {
@@ -300,10 +373,12 @@ async fn auth_login(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unnamed-terminal".into());
 
-    match state
-        .store
-        .authenticate(&credentials.staff_id, &credentials.pin, &terminal, Utc::now())?
-    {
+    match state.store.authenticate(
+        &credentials.staff_id,
+        &credentials.pin,
+        &terminal,
+        Utc::now(),
+    )? {
         AuthOutcome::Granted { token, session } => {
             let mut response = Json(serde_json::json!({
                 "ok": true,
@@ -315,21 +390,23 @@ async fn auth_login(
                 session::issue(&token, state.config.secure_cookies)
                     .parse()
                     .map_err(|_| {
-                        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not issue a session.".into())
+                        ApiError(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Could not issue a session.".into(),
+                        )
                     })?,
             );
             Ok(response)
         }
-        // A wrong PIN and an unknown staff id give the same answer and take the
+        // A wrong PIN and an unknown staff id answer identically and take the
         // same time, so neither can be used to enumerate the roster.
-        AuthOutcome::WrongPin { attempts_remaining } => Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            format!(
-                "That PIN was not recognised. {attempts_remaining} attempt{} left before this account locks.",
-                if attempts_remaining == 1 { "" } else { "s" }
-            ),
-        )),
-        AuthOutcome::UnknownStaff => Err(ApiError(
+        //
+        // The remaining-attempts count used to be appended here and not to the
+        // unknown-staff reply, which made the two distinguishable by exactly
+        // the sentence meant to reassure staff: one guess per candidate id
+        // sorted real names from invented ones. Staff still learn they are
+        // locked out when it happens, from the 423 below.
+        AuthOutcome::WrongPin { .. } | AuthOutcome::UnknownStaff => Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "That PIN was not recognised.".into(),
         )),
@@ -489,9 +566,13 @@ async fn actions(
 }
 
 /// Server-sent events: the current revision on connect, then every change.
+/// How often an open stream re-checks that its session is still valid.
+const STREAM_SESSION_CHECK: Duration = Duration::from_secs(60);
+
 async fn stream(
     State(state): State<Shared>,
     CurrentSession(_): CurrentSession,
+    headers: HeaderMap,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
     use futures::StreamExt;
     use tokio_stream::wrappers::BroadcastStream;
@@ -502,13 +583,41 @@ async fn stream(
     let first = futures::stream::once(async move { initial });
     let rest = BroadcastStream::new(receiver).filter_map(|item| async move { item.ok() });
 
-    let events = first.chain(rest).map(|revision| {
+    let revisions = first.chain(rest).map(|revision| {
         Ok(Event::default()
             .event("state")
             .data(serde_json::to_string(&revision).unwrap_or_default()))
     });
 
-    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+    // The session is resolved once, when the stream opens. Without this the
+    // connection then outlives it indefinitely: a terminal abandoned on the
+    // pass keeps receiving guest names, allergies and dietary needs long past
+    // the idle expiry, which is the exact risk that expiry exists for. Its
+    // writes fail, but the data keeps arriving.
+    //
+    // Ticks also slide the idle window, so a screen someone is actively
+    // watching stays signed in.
+    let token = session::session_cookie(&headers).map(str::to_string);
+    let checks = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval_at(
+        tokio::time::Instant::now() + STREAM_SESSION_CHECK,
+        STREAM_SESSION_CHECK,
+    ))
+    .map(move |_| Err(token.clone()));
+
+    let guarded = futures::stream::select(revisions.map(Ok), checks)
+        .take_while(move |item| {
+            let alive = match item {
+                Ok(_) => true,
+                Err(token) => token
+                    .as_deref()
+                    .and_then(|token| state.store.session(token, Utc::now()).ok().flatten())
+                    .is_some(),
+            };
+            async move { alive }
+        })
+        .filter_map(|item| async move { item.ok() });
+
+    Ok(Sse::new(guarded).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Serialize)]
@@ -916,7 +1025,14 @@ pub async fn serve(state: Shared) -> std::io::Result<()> {
 /// got before the window can be pointed at it, and must not race another
 /// process for it in between — so it binds first and hands the listener over.
 pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::io::Result<()> {
-    axum::serve(listener, router(state)).await
+    // `into_make_service_with_connect_info` is what makes the peer address
+    // reachable from a handler. Without it the sign-in limiter has no way to
+    // tell one caller from another and buckets the whole venue together.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
 }
 
 #[cfg(test)]
