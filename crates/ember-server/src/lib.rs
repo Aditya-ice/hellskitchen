@@ -537,7 +537,8 @@ struct RecommendationPayload {
     tables: Vec<Recommendation>,
     dishes: Vec<Recommendation>,
     estimate_wait: f64,
-    order_total: f64,
+    /// Check subtotal in minor units. Formatted at the edge, not here.
+    order_total_cents: i64,
     /// "engine" or "model". Honest about which ranking this actually is.
     ranked_by: &'static str,
 }
@@ -599,7 +600,10 @@ async fn recommendations(
         tables: engine::recommend_tables(guest, &revision.state.tables),
         dishes,
         estimate_wait: engine::estimate_wait(guest, &revision.state.tables),
-        order_total: engine::order_total(revision.state.order_for_guest(&guest_id), &menu_items),
+        order_total_cents: engine::order_total(
+            revision.state.order_for_guest(&guest_id),
+            &menu_items,
+        ),
         guest_id,
         version: revision.version,
         ranked_by,
@@ -612,14 +616,31 @@ async fn recommendations(
 /// The last line of defence. `services/brain` is careful not to touch
 /// eligibility, but "careful" is a property of code that can change; this is
 /// checked on every response.
+/// Whether a reranked list still says exactly what the engine said about safety.
+///
+/// The reranker is allowed to reorder dishes and to explain why it moved one.
+/// It is not allowed to touch anything the engine decided: which dishes exist,
+/// whether each may be sold, or the warnings attached to it.
+///
+/// `warnings` is checked as well as `eligible`, and that is not belt-and-braces.
+/// Eligibility alone lets a reranker return a dish that is still marked
+/// sellable while quietly dropping "contains tree nuts" from it — the dish
+/// stays orderable and the one line telling a server why to ask the guest is
+/// gone. Allergen text is the engine's to write, so a list that has altered it
+/// is discarded whole, exactly as an unblocked dish is.
+///
+/// `reasons` and `score` are deliberately not checked: reordering and saying
+/// why is the reranker's whole job.
 fn preserves_eligibility(engine: &[Recommendation], reranked: &[Recommendation]) -> bool {
     if engine.len() != reranked.len() {
         return false;
     }
     engine.iter().all(|original| {
-        reranked
-            .iter()
-            .any(|candidate| candidate.id == original.id && candidate.eligible == original.eligible)
+        reranked.iter().any(|candidate| {
+            candidate.id == original.id
+                && candidate.eligible == original.eligible
+                && candidate.warnings == original.warnings
+        })
     })
 }
 
@@ -952,5 +973,58 @@ mod tests {
     #[test]
     fn an_empty_ranking_matches_an_empty_menu() {
         assert!(preserves_eligibility(&[], &[]));
+    }
+
+    /// A dish carrying an allergen warning the engine attached to it.
+    fn warned(id: &str, warning: &str) -> Recommendation {
+        Recommendation {
+            id: id.into(),
+            score: 50.0,
+            eligible: true,
+            reasons: vec![],
+            warnings: vec![warning.into()],
+        }
+    }
+
+    #[test]
+    fn dropping_a_warning_is_refused_even_when_the_dish_stays_blocked_correctly() {
+        // The hole this closes: checking only `eligible` let a reranker return
+        // a dish still marked sellable while quietly deleting "contains tree
+        // nuts". The dish stays orderable and the one line telling a server to
+        // ask the guest is gone -- worse than unblocking it, because nothing
+        // looks wrong.
+        let engine = vec![warned("a", "Contains tree nuts")];
+        let reranked = vec![dish("a", true)];
+        assert!(!preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn rewriting_a_warning_is_refused() {
+        let engine = vec![warned("a", "Contains tree nuts")];
+        let reranked = vec![warned("a", "May contain traces of nuts")];
+        assert!(
+            !preserves_eligibility(&engine, &reranked),
+            "softening an allergen warning is not the reranker's call"
+        );
+    }
+
+    #[test]
+    fn adding_a_warning_the_engine_did_not_write_is_refused() {
+        // Sounds harmless, and is not: warnings are the engine's account of
+        // what it checked. A model inventing one makes the POS assert
+        // something nobody verified.
+        let engine = vec![dish("a", true)];
+        let reranked = vec![warned("a", "Contains shellfish")];
+        assert!(!preserves_eligibility(&engine, &reranked));
+    }
+
+    #[test]
+    fn reordering_and_explaining_are_still_allowed() {
+        // The guard must not be so tight that the reranker cannot do its job.
+        let engine = vec![warned("a", "Contains tree nuts"), dish("b", true)];
+        let mut moved = vec![dish("b", true), warned("a", "Contains tree nuts")];
+        moved[0].reasons = vec!["Ordered 4 times tonight".into()];
+        moved[0].score = 91.0;
+        assert!(preserves_eligibility(&engine, &moved));
     }
 }

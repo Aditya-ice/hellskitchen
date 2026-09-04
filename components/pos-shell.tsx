@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Accessibility,
   Armchair,
@@ -26,6 +26,7 @@ import {
   UtensilsCrossed,
 } from "lucide-react";
 import type { GuestProfile, TableStatus } from "@/lib/domain";
+import { formatMoney } from "@/lib/format";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
 import { FloorAgent } from "@/components/floor-agent";
@@ -68,6 +69,13 @@ function StatusPill({ status }: { status: GuestProfile["status"] }) {
 export function PosShell() {
   const pos = usePos();
   const todayLabel = useTodayLabel();
+  // Bound to the venue's currency once, rather than a "$" hardcoded at each
+  // of the four places a price is rendered.
+  const money = useCallback(
+    (cents: number) => formatMoney(cents, pos.restaurant.currency || "USD"),
+    [pos.restaurant.currency],
+  );
+
   const [activeTab, setActiveTab] = useState<Tab>("arrivals");
   const [search, setSearch] = useState("");
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -639,7 +647,7 @@ export function PosShell() {
                           <p className="font-black">{item.name}</p>
                           <p className="mt-1 text-xs leading-5 text-ink-muted">{item.description}</p>
                         </div>
-                        <p className="font-black">${item.price}</p>
+                        <p className="font-black">{money(item.priceCents)}</p>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-1.5">
                         {item.tags.map((tag) => (
@@ -697,7 +705,7 @@ export function PosShell() {
                   <div className="space-y-3">
                     {selectedOrder.lines.map((line) => {
                       const item = pos.menuItems.find((menuItem) => menuItem.id === line.menuItemId);
-                      const label = item?.name ?? line.menuItemId;
+                      const label = line.nameSnapshot ?? item?.name ?? line.menuItemId;
                       return (
                         <div key={line.menuItemId} className="flex items-start justify-between gap-3">
                           <div>
@@ -706,7 +714,15 @@ export function PosShell() {
                                 what the party is being charged for. */}
                             <p className="text-sm font-black">{label}</p>
                             <p className="mt-0.5 text-xs text-ink-muted">
-                              {item ? `$${item.price} each` : "Price unavailable"}
+                              {/* The line's own recorded price, not the menu's:
+                                  a dish repriced mid-service must not restate
+                                  what this party was quoted. */}
+                              {line.unitPriceCents !== null &&
+                              line.unitPriceCents !== undefined
+                                ? `${money(line.unitPriceCents)} each`
+                                : item
+                                  ? `${money(item.priceCents)} each`
+                                  : "Price unavailable"}
                             </p>
                           </div>
                           <div className="flex items-center gap-1">
@@ -758,7 +774,7 @@ export function PosShell() {
               <div className="border-t border-line bg-surface-muted/60 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-bold">Subtotal</span>
-                  <span className="text-xl font-black">${pos.insight.orderTotal.toFixed(2)}</span>
+                  <span className="text-xl font-black">{money(pos.insight.orderTotalCents)}</span>
                 </div>
                 <button
                   type="button"
@@ -853,7 +869,7 @@ export function PosShell() {
                   </div>
                   <div className="rounded-xl border border-line p-4">
                     <CircleDollarSign className="size-5 text-accent" />
-                    <p className="mt-3 text-sm font-black">${pos.insight.orderTotal.toFixed(2)}</p>
+                    <p className="mt-3 text-sm font-black">{money(pos.insight.orderTotalCents)}</p>
                     <p className="mt-1 text-xs text-ink-muted">Current subtotal</p>
                   </div>
                 </div>

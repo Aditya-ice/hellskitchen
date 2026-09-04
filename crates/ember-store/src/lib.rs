@@ -678,6 +678,58 @@ mod tests {
     }
 
     #[test]
+    fn an_order_saved_before_prices_were_recorded_on_the_line_still_loads() {
+        // Lines used to be just an id, a quantity and a note. Without serde
+        // defaults on the two new fields this fails outright with "missing
+        // field", taking the whole service down on upgrade.
+        let legacy = serde_json::json!({
+            "tables": [],
+            "guests": [],
+            "orders": [{
+                "id": "order-noah",
+                "guestId": "guest-noah",
+                "tableId": "t3",
+                "status": "draft",
+                "lines": [{ "menuItemId": "beet-salad", "quantity": 2, "notes": "" }],
+                "guestNotes": "",
+                "createdAt": "2026-08-09T21:39:00.000Z",
+                "sentAt": null,
+                "completedAt": null
+            }],
+            "activity": []
+        })
+        .to_string();
+
+        let store = Store::in_memory().unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE snapshot SET version = 4, state = ?1 WHERE id = 1",
+                    [&legacy],
+                )
+                .unwrap();
+        }
+
+        let revision = store.revision().expect("a pre-price snapshot must load");
+        let line = &revision.state.orders[0].lines[0];
+        assert_eq!(line.menu_item_id, "beet-salad");
+        assert_eq!(
+            line.unit_price_cents, None,
+            "no price was recorded for this line, and pretending otherwise \
+             would invent a number nobody agreed"
+        );
+        assert_eq!(line.name_snapshot, None);
+
+        // With nothing recorded, the menu is the only information there is —
+        // which is how this line was totalled when it was written.
+        assert_eq!(
+            ember_core::order_total(revision.state.orders.first(), &seed::menu_items()),
+            3400
+        );
+    }
+
+    #[test]
     fn the_log_can_be_read_incrementally() {
         let store = Store::in_memory().unwrap();
         changed(store.apply(&seat("a1", "guest-maya", "t2")).unwrap());

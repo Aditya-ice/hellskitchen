@@ -57,7 +57,8 @@ export interface GuestInsight {
   tables: Recommendation[];
   dishes: Recommendation[];
   estimateWait: number;
-  orderTotal: number;
+  /** Subtotal in minor units. Formatted at the edge. */
+  orderTotalCents: number;
   /** Whether the brain reranked this, or it is the engine's own ordering. */
   rankedBy: "engine" | "model";
 }
@@ -67,7 +68,7 @@ const emptyInsight: GuestInsight = {
   tables: [],
   dishes: [],
   estimateWait: 0,
-  orderTotal: 0,
+  orderTotalCents: 0,
   rankedBy: "engine",
 };
 
@@ -78,13 +79,23 @@ const emptySummary: FloorSummary = {
   averageWaitMinutes: 0,
 };
 
+/**
+ * What the UI renders before the menu loads, and if it never does.
+ *
+ * The name used to be "Ember & Ash" — the seeded demo restaurant — so a client
+ * that could not reach the server displayed a confident, wrong venue name and a
+ * "Dinner service" label it had invented. An empty name renders as nothing,
+ * which is the truth.
+ */
 const emptyMenu: MenuPayload = {
   restaurant: {
-    name: "Ember & Ash",
-    shortName: "E&A",
+    name: "",
+    shortName: "",
     venue: "",
-    serviceLabel: "Dinner service",
+    serviceLabel: "",
     covers: 0,
+    currency: "USD",
+    taxRateBps: 0,
   },
   menuItems: [],
   staff: [],
@@ -342,7 +353,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           tables: payload.tables,
           dishes: payload.dishes,
           estimateWait: payload.estimateWait,
-          orderTotal: payload.orderTotal,
+          orderTotalCents: payload.orderTotalCents,
           rankedBy: payload.rankedBy ?? "engine",
         }),
       )

@@ -59,7 +59,8 @@ export interface RecommendationPayload {
   tables: Recommendation[];
   dishes: Recommendation[];
   estimateWait: number;
-  orderTotal: number;
+  /** Subtotal in minor units. */
+  orderTotalCents: number;
   /** Which ranking this actually is — the brain may be absent or unhelpful. */
   rankedBy: "engine" | "model";
 }

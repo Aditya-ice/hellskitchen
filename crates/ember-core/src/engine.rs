@@ -312,18 +312,26 @@ pub fn recommend_dishes(
     recommendations
 }
 
-pub fn order_total(order: Option<&Order>, menu_items: &[MenuItem]) -> f64 {
-    let Some(order) = order else { return 0.0 };
+/// The check total, in minor units.
+///
+/// Reads the price recorded on each line rather than looking it up in the menu,
+/// so repricing a dish no longer rewrites checks that already contain it — the
+/// bug that made every historical total a function of today's menu. `menu_items`
+/// remains only as the fallback for lines written before prices were captured.
+pub fn order_total(order: Option<&Order>, menu_items: &[MenuItem]) -> i64 {
+    let Some(order) = order else { return 0 };
     order
         .lines
         .iter()
         .map(|line| {
-            let price = menu_items
-                .iter()
-                .find(|item| item.id == line.menu_item_id)
-                .map(|item| item.price)
-                .unwrap_or(0.0);
-            price * line.quantity as f64
+            let unit = line.unit_price_cents.unwrap_or_else(|| {
+                menu_items
+                    .iter()
+                    .find(|item| item.id == line.menu_item_id)
+                    .map(|item| item.price_cents)
+                    .unwrap_or(0)
+            });
+            unit.saturating_mul(i64::from(line.quantity))
         })
         .sum()
 }
@@ -454,27 +462,64 @@ mod tests {
 
     // --- orders ---
 
+    fn line(menu_item_id: &str, quantity: u32, unit_price_cents: Option<i64>) -> OrderLine {
+        OrderLine {
+            menu_item_id: menu_item_id.into(),
+            quantity,
+            notes: String::new(),
+            unit_price_cents,
+            name_snapshot: None,
+        }
+    }
+
     #[test]
-    fn calculates_totals_from_quantity_and_menu_price() {
+    fn totals_come_from_the_price_recorded_on_each_line() {
         let mut order = seed::orders().remove(0);
         order.lines = vec![
-            OrderLine {
-                menu_item_id: "beet-salad".into(),
-                quantity: 2,
-                notes: String::new(),
-            },
-            OrderLine {
-                menu_item_id: "chocolate-torte".into(),
-                quantity: 1,
-                notes: String::new(),
-            },
+            line("beet-salad", 2, Some(1700)),
+            line("chocolate-torte", 1, Some(1400)),
         ];
 
-        assert_eq!(order_total(Some(&order), &seed::menu_items()), 48.0);
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 4800);
+    }
+
+    #[test]
+    fn repricing_a_dish_does_not_rewrite_a_check_that_already_holds_it() {
+        // The whole reason prices are captured on the line. Totals used to be
+        // recomputed from the live menu, so a price change silently restated
+        // every check the dish had ever appeared on, settled ones included.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, Some(1700))];
+
+        let mut repriced = seed::menu_items();
+        for item in repriced.iter_mut().filter(|item| item.id == "beet-salad") {
+            item.price_cents = 9900;
+        }
+
+        assert_eq!(order_total(Some(&order), &repriced), 3400);
+    }
+
+    #[test]
+    fn a_line_from_before_prices_were_recorded_falls_back_to_the_menu() {
+        // No price was captured for these, so the menu is the only information
+        // there is about them — which is exactly how they were totalled when
+        // they were written.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 3400);
+    }
+
+    #[test]
+    fn an_unknown_dish_on_an_old_line_totals_zero_rather_than_panicking() {
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("withdrawn-dish", 3, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 0);
     }
 
     #[test]
     fn an_absent_order_totals_zero() {
-        assert_eq!(order_total(None, &seed::menu_items()), 0.0);
+        assert_eq!(order_total(None, &seed::menu_items()), 0);
     }
 }

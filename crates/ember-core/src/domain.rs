@@ -183,10 +183,18 @@ pub struct MenuItem {
     pub ingredient_ids: Vec<String>,
     pub tags: Vec<String>,
     pub allergens: Vec<String>,
-    // NOTE: money as f64 mirrors the TypeScript `number` this was ported from.
-    // Worth moving to integer cents, but that changes the wire format and every
-    // price format call in the UI, so it is deliberately left for a follow-up.
-    pub price: f64,
+    /// Price in minor units — cents for USD.
+    ///
+    /// Integer, not a float. `0.1 + 0.2` is famously not `0.3`, and a till that
+    /// is a cent out at the end of a service is a till nobody trusts. Every
+    /// total in this system is integer arithmetic from here to the check.
+    ///
+    /// Typed as `number` on the wire, not `bigint`: serde_json writes it as a
+    /// JSON number and `JSON.parse` hands back a JS number, so `bigint` would
+    /// describe a value the client never actually receives. A cent count stays
+    /// exact in a double well past any sum a restaurant will take.
+    #[ts(type = "number")]
+    pub price_cents: i64,
     pub prep_minutes: f64,
     pub popularity: f64,
     pub margin_score: f64,
@@ -249,6 +257,24 @@ pub struct OrderLine {
     pub menu_item_id: String,
     pub quantity: u32,
     pub notes: String,
+    /// What one of these cost when it was added to the check.
+    ///
+    /// Totals used to be recomputed from the *live* menu, so repricing a dish
+    /// silently rewrote every check that had ever contained it, including ones
+    /// already settled. A check is a record of what was agreed, so the price
+    /// is captured here at the moment the line is created and never looked up
+    /// again.
+    ///
+    /// `None` only for lines written before this existed. Those have no
+    /// recorded price, so they fall back to the menu — the behaviour they were
+    /// created under, and the only information there is about them.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub unit_price_cents: Option<i64>,
+    /// What the dish was called when it was added, so a renamed or withdrawn
+    /// dish still reads correctly on an old check.
+    #[serde(default)]
+    pub name_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

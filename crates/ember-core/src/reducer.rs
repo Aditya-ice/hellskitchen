@@ -312,12 +312,10 @@ fn apply(state: &PosState, action: &Action) -> Result<PosState, Rejection> {
         } => {
             // An id the menu does not have would become a line that consumes
             // no stock and prices at zero -- a silent hole in the check.
-            if !seed::menu_items()
-                .iter()
-                .any(|item| item.id == *menu_item_id)
-            {
+            let menu = seed::menu_items();
+            let Some(listed) = menu.iter().find(|item| item.id == *menu_item_id) else {
                 return Err(Rejection::UnknownMenuItem);
-            }
+            };
             let order = next
                 .orders
                 .iter_mut()
@@ -329,10 +327,14 @@ fn apply(state: &PosState, action: &Action) -> Result<PosState, Rejection> {
                 .find(|line| line.menu_item_id == *menu_item_id)
             {
                 Some(line) => line.quantity += 1,
+                // Capture the price and name now: a dish repriced or renamed
+                // later must not change what this check says.
                 None => order.lines.push(OrderLine {
                     menu_item_id: menu_item_id.clone(),
                     quantity: 1,
                     notes: String::new(),
+                    unit_price_cents: Some(listed.price_cents),
+                    name_snapshot: Some(listed.name.clone()),
                 }),
             }
         }
