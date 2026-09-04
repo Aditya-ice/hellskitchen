@@ -15,7 +15,7 @@ import {
   Minus,
   Plus,
   ReceiptText,
-  RotateCcw,
+  LogOut,
   WifiOff,
   Search,
   ShieldAlert,
@@ -176,13 +176,27 @@ export function PosShell() {
             )}
             <FloorAgent />
             <GuestTools />
-            <button
-              type="button"
-              onClick={pos.resetDemo}
-              className="flex items-center gap-2 rounded-full border border-line px-3 py-2 text-xs font-black hover:border-foreground"
-            >
-              <RotateCcw className="size-3.5" /> Reset demo
-            </button>
+            {/* Who the floor is recording actions against. This replaced a
+                "Reset demo" button that wiped the entire service on one click,
+                with no confirmation, sitting in the same row as the tools
+                people reach for mid-service. */}
+            {pos.identity ? (
+              <div className="flex items-center gap-2">
+                <div className="text-right">
+                  <p className="text-xs font-black leading-tight">{pos.identity.name}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
+                    {pos.identity.role}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={pos.signOut}
+                  className="flex items-center gap-2 rounded-full border border-line px-3 py-2 text-xs font-black hover:border-foreground"
+                >
+                  <LogOut className="size-3.5" aria-hidden="true" /> Sign out
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

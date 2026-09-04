@@ -8,6 +8,7 @@
 pub mod brain;
 pub mod config;
 pub mod guard;
+pub mod session;
 pub mod sponsors;
 mod statics;
 
@@ -20,9 +21,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ember_core::{engine, seed, Action, Recommendation, Rejection};
+use chrono::Utc;
+use ember_core::{engine, seed, Action, Actor, Recommendation, Rejection, StaffRole};
+use ember_store::auth::AuthOutcome;
 use ember_store::{Applied, Revision, Store};
 use futures::stream::Stream;
+
+use crate::session::CurrentSession;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -87,6 +92,10 @@ type Shared = Arc<AppState>;
 pub fn router(state: Shared) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth/setup", post(auth_setup))
+        .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/me", get(auth_me))
         .route("/api/state", get(state_handler))
         .route("/api/actions", post(actions))
         .route("/api/stream", get(stream))
@@ -96,7 +105,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/actions/log", get(action_log))
         .route("/api/forecast", get(forecast))
         .route("/api/agent/ask", post(agent_ask))
-        .route("/api/demo-session", post(demo_session))
         .route("/api/elevenlabs/token", get(elevenlabs_token))
         .route("/api/tavily/search", post(tavily_search))
         .fallback(statics::serve)
@@ -160,7 +168,227 @@ async fn health(State(state): State<Shared>) -> ApiResult<Json<Health>> {
     }))
 }
 
-async fn state_handler(State(state): State<Shared>) -> ApiResult<Json<Revision>> {
+// --- authentication -------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Credentials {
+    staff_id: String,
+    pin: String,
+    /// Which screen this is. Free-form, so a venue can label the pass, the host
+    /// stand and the bar however it likes; it lands in the audit trail beside
+    /// the staff id.
+    #[serde(default)]
+    terminal_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Identity {
+    staff_id: String,
+    name: String,
+    role: StaffRole,
+    terminal_id: String,
+}
+
+fn identity(session: &ember_store::auth::Session) -> Option<Identity> {
+    seed::staff()
+        .into_iter()
+        .find(|member| member.id == session.staff_id)
+        .map(|member| Identity {
+            staff_id: member.id,
+            name: member.name,
+            role: member.role,
+            terminal_id: session.terminal_id.clone(),
+        })
+}
+
+/// First-run bootstrap: sets the first PIN when no credential exists yet.
+///
+/// Open by necessity — there is nobody to authenticate as before this runs —
+/// and closed the moment it succeeds, because it refuses to do anything once
+/// any credential exists. It also only accepts a manager, so the first account
+/// on a new terminal cannot be a low-privilege one that then cannot grant
+/// anything.
+async fn auth_setup(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    payload: Option<Json<Credentials>>,
+) -> ApiResult<Response> {
+    guard::require_same_origin(&headers).map_err(|rejection| {
+        ApiError(
+            rejection.status(),
+            "Cross-site requests are not allowed.".into(),
+        )
+    })?;
+
+    let Json(credentials) = payload.ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "Expected a staff id and a PIN.".into(),
+        )
+    })?;
+
+    if state.store.has_any_credentials()? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This terminal already has staff PINs. Ask a manager to add yours.".into(),
+        ));
+    }
+
+    if role_of(&credentials.staff_id) != Some(StaffRole::Manager) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "The first PIN must belong to a manager.".into(),
+        ));
+    }
+
+    state
+        .store
+        .set_staff_pin(&credentials.staff_id, &credentials.pin, Utc::now())
+        .map_err(|error| match error {
+            ember_store::StoreError::WeakPin => ApiError(
+                StatusCode::BAD_REQUEST,
+                "A PIN must be 4 to 12 digits.".into(),
+            ),
+            other => ApiError(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "ok": true }))).into_response())
+}
+
+async fn auth_login(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    payload: Option<Json<Credentials>>,
+) -> ApiResult<Response> {
+    guard::require_same_origin(&headers).map_err(|rejection| {
+        ApiError(
+            rejection.status(),
+            "Cross-site requests are not allowed.".into(),
+        )
+    })?;
+
+    let Json(credentials) = payload.ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "Expected a staff id and a PIN.".into(),
+        )
+    })?;
+
+    // Rate-limited by IP as well as by the per-account lockout: the lockout
+    // stops an attack on one account, this stops one sweeping the roster.
+    state
+        .limiter
+        .check(
+            &headers,
+            "auth-login",
+            state.config.trust_forwarded_for,
+            10,
+            Duration::from_secs(60),
+        )
+        .map_err(|rejection| {
+            ApiError(
+                rejection.status(),
+                "Too many sign-in attempts. Wait a moment.".into(),
+            )
+        })?;
+
+    let terminal = credentials
+        .terminal_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unnamed-terminal".into());
+
+    match state
+        .store
+        .authenticate(&credentials.staff_id, &credentials.pin, &terminal, Utc::now())?
+    {
+        AuthOutcome::Granted { token, session } => {
+            let mut response = Json(serde_json::json!({
+                "ok": true,
+                "identity": identity(&session),
+            }))
+            .into_response();
+            response.headers_mut().insert(
+                axum::http::header::SET_COOKIE,
+                session::issue(&token, state.config.secure_cookies)
+                    .parse()
+                    .map_err(|_| {
+                        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not issue a session.".into())
+                    })?,
+            );
+            Ok(response)
+        }
+        // A wrong PIN and an unknown staff id give the same answer and take the
+        // same time, so neither can be used to enumerate the roster.
+        AuthOutcome::WrongPin { attempts_remaining } => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "That PIN was not recognised. {attempts_remaining} attempt{} left before this account locks.",
+                if attempts_remaining == 1 { "" } else { "s" }
+            ),
+        )),
+        AuthOutcome::UnknownStaff => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "That PIN was not recognised.".into(),
+        )),
+        AuthOutcome::LockedOut { until } => Err(ApiError(
+            StatusCode::LOCKED,
+            format!(
+                "This account is locked until {}. A manager can reset the PIN.",
+                until.format("%H:%M")
+            ),
+        )),
+    }
+}
+
+async fn auth_logout(State(state): State<Shared>, headers: HeaderMap) -> ApiResult<Response> {
+    if let Some(token) = session::session_cookie(&headers) {
+        state.store.end_session(token)?;
+    }
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        session::clear(state.config.secure_cookies)
+            .parse()
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not clear the session.".into(),
+                )
+            })?,
+    );
+    Ok(response)
+}
+
+/// Who this terminal is signed in as. The UI calls it on load to decide between
+/// the sign-in screen and the floor.
+async fn auth_me(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let session = session::session_cookie(&headers)
+        .and_then(|token| state.store.session(token, Utc::now()).ok().flatten());
+
+    Ok(Json(match session {
+        Some(session) => serde_json::json!({
+            "authenticated": true,
+            "identity": identity(&session),
+        }),
+        None => serde_json::json!({
+            "authenticated": false,
+            // Drives first-run: with no PINs at all there is nothing to sign in
+            // to, and the UI shows setup instead of a login it cannot satisfy.
+            "needsSetup": !state.store.has_any_credentials().unwrap_or(false),
+        }),
+    }))
+}
+
+async fn state_handler(
+    State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
+) -> ApiResult<Json<Revision>> {
     Ok(Json(state.store.revision()?))
 }
 
@@ -184,10 +412,65 @@ struct ActionOutcome {
     revision: Revision,
 }
 
+/// The role a staff id carries, if the roster knows them.
+///
+/// Reads the seeded roster for now; when reference data moves into `PosState`
+/// this becomes a lookup on the state and nothing else changes.
+fn role_of(staff_id: &str) -> Option<StaffRole> {
+    seed::staff()
+        .into_iter()
+        .find(|member| member.id == staff_id)
+        .map(|member| member.role)
+}
+
+/// Actions a manager has to authorise.
+///
+/// `StaffRole` has existed since the first commit and no code path read it, so
+/// a bus tablet could do everything a manager could. The gate is here, on the
+/// server, because a UI that merely hides a button is not an authorisation
+/// control -- anything that can reach the port can still send the action.
+fn requires_manager(kind: &ember_core::ActionKind) -> bool {
+    matches!(kind, ember_core::ActionKind::Reset)
+}
+
+/// What a client is allowed to send.
+///
+/// Deliberately not `Action`: `at` and `actor` are stamped here, from the
+/// server clock and the session. `at` used to be taken from the request body
+/// and written straight into `sent_at` and `completed_at`, which meant ticket
+/// age and cook time -- the numbers the pass runs on, and the ones a dispute
+/// turns on -- were whatever the client claimed they were.
+#[derive(Deserialize)]
+struct ActionRequest {
+    /// Client-generated, and the one thing that must come from the client: it
+    /// is what makes a retried request idempotent rather than a second seating.
+    id: String,
+    #[serde(flatten)]
+    kind: ember_core::ActionKind,
+}
+
 async fn actions(
     State(state): State<Shared>,
-    Json(action): Json<Action>,
+    CurrentSession(session): CurrentSession,
+    Json(request): Json<ActionRequest>,
 ) -> ApiResult<Json<ActionOutcome>> {
+    if requires_manager(&request.kind) && role_of(&session.staff_id) != Some(StaffRole::Manager) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "That needs a manager.".into(),
+        ));
+    }
+
+    let action = Action {
+        id: request.id,
+        // Stamped here, never taken from the body: see ActionRequest.
+        at: Utc::now().to_rfc3339(),
+        actor: Some(Actor {
+            staff_id: session.staff_id.clone(),
+            terminal_id: session.terminal_id.clone(),
+        }),
+        kind: request.kind,
+    };
     let applied = state.apply(&action)?;
 
     let (outcome, reason, revision) = match applied {
@@ -208,6 +491,7 @@ async fn actions(
 /// Server-sent events: the current revision on connect, then every change.
 async fn stream(
     State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
     use futures::StreamExt;
     use tokio_stream::wrappers::BroadcastStream;
@@ -237,7 +521,7 @@ struct MenuPayload {
     staff: Vec<ember_core::StaffMember>,
 }
 
-async fn menu() -> Json<MenuPayload> {
+async fn menu(CurrentSession(_): CurrentSession) -> Json<MenuPayload> {
     Json(MenuPayload {
         restaurant: seed::restaurant(),
         menu_items: seed::menu_items(),
@@ -269,6 +553,7 @@ struct RecommendationQuery {
 
 async fn recommendations(
     State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
     Path(guest_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<RecommendationQuery>,
 ) -> ApiResult<Json<RecommendationPayload>> {
@@ -340,7 +625,7 @@ fn preserves_eligibility(engine: &[Recommendation], reranked: &[Recommendation])
 
 /// The optional demand forecast. Absent when the brain is not configured or
 /// not answering.
-async fn forecast(State(state): State<Shared>) -> Response {
+async fn forecast(State(state): State<Shared>, CurrentSession(_): CurrentSession) -> Response {
     let Some(base) = state.config.brain_url.as_deref() else {
         return Json(serde_json::json!({ "available": false })).into_response();
     };
@@ -374,6 +659,7 @@ struct ActionLog {
 /// to hand over in one response, and a caller that wants it all can walk it.
 async fn action_log(
     State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
     axum::extract::Query(query): axum::extract::Query<LogQuery>,
 ) -> ApiResult<Json<ActionLog>> {
     let limit = query.limit.unwrap_or(500).clamp(1, 2000);
@@ -402,7 +688,10 @@ struct FloorSummary {
     average_wait_minutes: f64,
 }
 
-async fn summary(State(state): State<Shared>) -> ApiResult<Json<FloorSummary>> {
+async fn summary(
+    State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
+) -> ApiResult<Json<FloorSummary>> {
     let revision = state.store.revision()?;
     let floor = &revision.state;
 
@@ -441,19 +730,20 @@ async fn summary(State(state): State<Shared>) -> ApiResult<Json<FloorSummary>> {
 /// optional service is reported in the answer, not as an error.
 async fn agent_ask(
     State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
     headers: HeaderMap,
     body: Option<Json<AgentQuestion>>,
 ) -> Response {
     if let Err(rejection) = guard::require_same_origin(&headers) {
         return rejection.into_response();
     }
-    if let Err(rejection) = guard::require_demo_session(&headers) {
-        return rejection.into_response();
-    }
-    if let Err(rejection) = state
-        .limiter
-        .check(&headers, "agent-ask", 8, Duration::from_secs(60))
-    {
+    if let Err(rejection) = state.limiter.check(
+        &headers,
+        "agent-ask",
+        state.config.trust_forwarded_for,
+        8,
+        Duration::from_secs(60),
+    ) {
         return rejection.into_response();
     }
 
@@ -487,44 +777,21 @@ struct AgentQuestion {
 
 // --- sponsor routes -------------------------------------------------------
 
-async fn demo_session(State(state): State<Shared>, headers: HeaderMap) -> Response {
+async fn elevenlabs_token(
+    State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
+    headers: HeaderMap,
+) -> Response {
     if let Err(rejection) = guard::require_same_origin(&headers) {
         return rejection.into_response();
     }
-    if guard::demo_session(&headers).is_some() {
-        return Json(serde_json::json!({ "ready": true })).into_response();
-    }
-    if let Err(rejection) =
-        state
-            .limiter
-            .check(&headers, "demo-session", 8, Duration::from_secs(60 * 60))
-    {
-        return rejection.into_response();
-    }
-
-    let session = uuid::Uuid::new_v4().to_string();
-    (
-        [(
-            "Set-Cookie",
-            guard::session_cookie(&session, state.config.secure_cookies),
-        )],
-        Json(serde_json::json!({ "ready": true })),
-    )
-        .into_response()
-}
-
-async fn elevenlabs_token(State(state): State<Shared>, headers: HeaderMap) -> Response {
-    if let Err(rejection) = guard::require_same_origin(&headers) {
-        return rejection.into_response();
-    }
-    if let Err(rejection) = guard::require_demo_session(&headers) {
-        return rejection.into_response();
-    }
-    if let Err(rejection) =
-        state
-            .limiter
-            .check(&headers, "elevenlabs-token", 6, Duration::from_secs(60))
-    {
+    if let Err(rejection) = state.limiter.check(
+        &headers,
+        "elevenlabs-token",
+        state.config.trust_forwarded_for,
+        6,
+        Duration::from_secs(60),
+    ) {
         return rejection.into_response();
     }
 
@@ -564,20 +831,20 @@ struct DishQuery {
 
 async fn tavily_search(
     State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
     headers: HeaderMap,
     body: Option<Json<DishQuery>>,
 ) -> Response {
     if let Err(rejection) = guard::require_same_origin(&headers) {
         return rejection.into_response();
     }
-    if let Err(rejection) = guard::require_demo_session(&headers) {
-        return rejection.into_response();
-    }
-    if let Err(rejection) =
-        state
-            .limiter
-            .check(&headers, "tavily-search", 10, Duration::from_secs(60))
-    {
+    if let Err(rejection) = state.limiter.check(
+        &headers,
+        "tavily-search",
+        state.config.trust_forwarded_for,
+        10,
+        Duration::from_secs(60),
+    ) {
         return rejection.into_response();
     }
 

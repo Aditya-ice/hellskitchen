@@ -6,6 +6,8 @@
 //! keyless tests cannot reach — the request shape actually sent to the vendor,
 //! and how failures are handled.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -14,12 +16,9 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use ember_server::{AppState, Config};
+use ember_server::Config;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tower::ServiceExt;
-
-const SESSION: &str = "ember_demo_session=123e4567-e89b-12d3-a456-426614174000";
 
 /// What the stub upstream saw.
 #[derive(Debug, Clone, Default)]
@@ -106,7 +105,7 @@ async fn stub_upstream(fail: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
     (format!("http://{address}"), recorded)
 }
 
-fn app_with(base: &str, fail_keys: bool) -> axum::Router {
+async fn app_with(base: &str, fail_keys: bool) -> common::TestApp {
     let config = Config {
         // Dummy credentials — the stub does not check them, but the proxy must
         // still send them in the right header.
@@ -116,24 +115,17 @@ fn app_with(base: &str, fail_keys: bool) -> axum::Router {
         tavily_base: base.to_string(),
         ..Config::default()
     };
-    ember_server::router(AppState::new(config).expect("in-memory store"))
+    common::signed_in(config).await
 }
 
-async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+async fn send(app: &common::TestApp, request: Request<Body>) -> (StatusCode, Value) {
+    app.send(request).await
 }
 
 fn token_request() -> Request<Body> {
     Request::builder()
         .uri("/api/elevenlabs/token")
         .header("host", "localhost:4000")
-        .header("cookie", SESSION)
         .body(Body::empty())
         .unwrap()
 }
@@ -144,7 +136,6 @@ fn search_request(dish_id: &str) -> Request<Body> {
         .uri("/api/tavily/search")
         .header("host", "localhost:4000")
         .header("content-type", "application/json")
-        .header("cookie", SESSION)
         .body(Body::from(json!({ "dishId": dish_id }).to_string()))
         .unwrap()
 }
@@ -152,7 +143,7 @@ fn search_request(dish_id: &str) -> Request<Body> {
 #[tokio::test]
 async fn a_scribe_token_is_fetched_and_the_key_never_reaches_the_client() {
     let (base, recorded) = stub_upstream(false).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     let (status, body) = send(&app, token_request()).await;
 
@@ -177,7 +168,7 @@ async fn a_scribe_token_is_fetched_and_the_key_never_reaches_the_client() {
 #[tokio::test]
 async fn dish_context_is_mapped_onto_the_ui_shape() {
     let (base, recorded) = stub_upstream(false).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     let (status, body) = send(&app, search_request("beet-salad")).await;
 
@@ -216,7 +207,7 @@ async fn dish_context_is_mapped_onto_the_ui_shape() {
 #[tokio::test]
 async fn an_upstream_failure_does_not_take_voice_notes_down_with_it() {
     let (base, _) = stub_upstream(true).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     let (status, body) = send(&app, token_request()).await;
 
@@ -230,7 +221,7 @@ async fn an_upstream_failure_does_not_take_voice_notes_down_with_it() {
 #[tokio::test]
 async fn an_upstream_failure_degrades_dish_context_to_the_fallback() {
     let (base, _) = stub_upstream(true).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     let (status, body) = send(&app, search_request("beet-salad")).await;
 
@@ -243,7 +234,7 @@ async fn an_upstream_failure_degrades_dish_context_to_the_fallback() {
 #[tokio::test]
 async fn an_unreachable_upstream_is_handled() {
     // Nothing is listening on this port.
-    let app = app_with("http://127.0.0.1:1", false);
+    let app = app_with("http://127.0.0.1:1", false).await;
 
     let (status, _) = send(&app, token_request()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -256,14 +247,14 @@ async fn an_unreachable_upstream_is_handled() {
 #[tokio::test]
 async fn the_upstream_is_never_called_without_a_session() {
     let (base, recorded) = stub_upstream(false).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     let request = Request::builder()
         .uri("/api/elevenlabs/token")
         .header("host", "localhost:4000")
         .body(Body::empty())
         .unwrap();
-    let (status, _) = send(&app, request).await;
+    let (status, _) = app.send_anonymous(request).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
@@ -280,7 +271,6 @@ fn ask_request(question: &str) -> Request<Body> {
         .uri("/api/agent/ask")
         .header("host", "localhost:4000")
         .header("content-type", "application/json")
-        .header("cookie", SESSION)
         .body(Body::from(json!({ "question": question }).to_string()))
         .unwrap()
 }
@@ -333,18 +323,18 @@ async fn answer_question(
     .into_response()
 }
 
-fn app_with_brain(base: Option<&str>) -> axum::Router {
-    let config = Config {
+async fn app_with_brain(base: Option<&str>) -> common::TestApp {
+    common::signed_in(Config {
         brain_url: base.map(str::to_string),
         ..Config::default()
-    };
-    ember_server::router(AppState::new(config).expect("in-memory store"))
+    })
+    .await
 }
 
 #[tokio::test]
 async fn a_missing_brain_is_an_answer_not_an_error() {
     // The POS works without it, so this must not look like a failure.
-    let app = app_with_brain(None);
+    let app = app_with_brain(None).await;
     let (status, body) = send(&app, ask_request("who is waiting?")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -354,7 +344,7 @@ async fn a_missing_brain_is_an_answer_not_an_error() {
 
 #[tokio::test]
 async fn an_unreachable_brain_degrades_to_an_answer() {
-    let app = app_with_brain(Some("http://127.0.0.1:1"));
+    let app = app_with_brain(Some("http://127.0.0.1:1")).await;
     let (status, body) = send(&app, ask_request("who is waiting?")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -367,7 +357,7 @@ async fn an_unreachable_brain_degrades_to_an_answer() {
 #[tokio::test]
 async fn an_agent_answer_is_passed_through() {
     let (base, recorded) = stub_brain().await;
-    let app = app_with_brain(Some(&base));
+    let app = app_with_brain(Some(&base)).await;
 
     let (status, body) = send(&app, ask_request("who has waited longest?")).await;
 
@@ -384,7 +374,7 @@ async fn an_agent_answer_is_passed_through() {
 #[tokio::test]
 async fn the_agent_requires_a_session_and_a_question() {
     let (base, recorded) = stub_brain().await;
-    let app = app_with_brain(Some(&base));
+    let app = app_with_brain(Some(&base)).await;
 
     // No session cookie.
     let anonymous = Request::builder()
@@ -394,7 +384,7 @@ async fn the_agent_requires_a_session_and_a_question() {
         .header("content-type", "application/json")
         .body(Body::from(json!({ "question": "hello" }).to_string()))
         .unwrap();
-    let (status, _) = send(&app, anonymous).await;
+    let (status, _) = app.send_anonymous(anonymous).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Empty question.
@@ -410,7 +400,7 @@ async fn the_agent_requires_a_session_and_a_question() {
 #[tokio::test]
 async fn rate_limiting_stops_a_client_from_burning_sponsor_quota() {
     let (base, recorded) = stub_upstream(false).await;
-    let app = app_with(&base, false);
+    let app = app_with(&base, false).await;
 
     // The token route allows six calls per minute.
     for _ in 0..6 {
@@ -418,7 +408,7 @@ async fn rate_limiting_stops_a_client_from_burning_sponsor_quota() {
         assert_eq!(status, StatusCode::OK);
     }
 
-    let response = app.clone().oneshot(token_request()).await.unwrap();
+    let response = app.send_raw(token_request()).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(
         response.headers().contains_key("retry-after"),

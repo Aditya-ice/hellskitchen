@@ -1,54 +1,24 @@
 //! End-to-end tests over the real router, exercised in-process.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ember_server::{AppState, Config};
-use http_body_util::BodyExt;
+use common::{get, post, TestApp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-const SESSION: &str = "ember_demo_session=123e4567-e89b-12d3-a456-426614174000";
-
-fn app() -> axum::Router {
-    let state = AppState::new(Config::default()).expect("in-memory store");
-    ember_server::router(state)
+async fn app() -> TestApp {
+    common::signed_in_default().await
 }
 
-async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
-    let response = app.clone().oneshot(request).await.expect("router responds");
-    let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body collected")
-        .to_bytes();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
-}
-
-fn get(uri: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header("host", "localhost:4000")
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post(uri: &str, body: Value) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("host", "localhost:4000")
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap()
+async fn send(app: &TestApp, request: Request<Body>) -> (StatusCode, Value) {
+    app.send(request).await
 }
 
 fn seat(id: &str, guest: &str, table: &str) -> Value {
     json!({
         "id": id,
-        "at": "2026-08-13T10:00:00.000Z",
         "type": "seat-guest",
         "guestId": guest,
         "tableId": table,
@@ -57,7 +27,7 @@ fn seat(id: &str, guest: &str, table: &str) -> Value {
 
 #[tokio::test]
 async fn state_starts_from_the_seeded_service() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/state")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -68,7 +38,7 @@ async fn state_starts_from_the_seeded_service() {
 
 #[tokio::test]
 async fn an_action_advances_the_revision() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -88,7 +58,7 @@ async fn an_action_advances_the_revision() {
 
 #[tokio::test]
 async fn a_replayed_action_id_is_reported_as_a_duplicate() {
-    let app = app();
+    let app = app().await;
     send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
     let (status, body) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
 
@@ -99,7 +69,7 @@ async fn a_replayed_action_id_is_reported_as_a_duplicate() {
 
 #[tokio::test]
 async fn a_guarded_action_is_reported_as_rejected() {
-    let app = app();
+    let app = app().await;
     // Jordan is still "expected" — not checked in.
     let (status, body) = send(&app, post("/api/actions", seat("a1", "guest-jordan", "t7"))).await;
 
@@ -119,7 +89,7 @@ async fn a_guarded_action_is_reported_as_rejected() {
 
 #[tokio::test]
 async fn an_allowed_no_op_is_not_reported_as_a_rejection() {
-    let app = app();
+    let app = app().await;
     // Seat Maya, then seat her at the same table again. The second is not a
     // refusal in the sense that matters -- but it is also not silence.
     let (_, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
@@ -132,7 +102,7 @@ async fn an_allowed_no_op_is_not_reported_as_a_rejection() {
 
 #[tokio::test]
 async fn a_change_that_alters_nothing_reports_unchanged() {
-    let app = app();
+    let app = app().await;
     // Read the note that is already there rather than hard-coding it, so this
     // keeps testing the no-op path even when the seed copy changes.
     let (_, state) = send(&app, get("/api/state")).await;
@@ -168,7 +138,7 @@ async fn a_change_that_alters_nothing_reports_unchanged() {
 
 #[tokio::test]
 async fn recommendations_rank_the_best_table_first() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/recommendations/guest-maya")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -194,7 +164,7 @@ async fn recommendations_rank_the_best_table_first() {
 
 #[tokio::test]
 async fn the_summary_reports_the_floor() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/summary")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -208,7 +178,7 @@ async fn the_summary_reports_the_floor() {
 
 #[tokio::test]
 async fn the_summary_follows_the_floor() {
-    let app = app();
+    let app = app().await;
     send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
 
     let (_, body) = send(&app, get("/api/summary")).await;
@@ -219,7 +189,7 @@ async fn the_summary_follows_the_floor() {
 
 #[tokio::test]
 async fn the_action_log_is_readable_for_anything_that_learns_from_it() {
-    let app = app();
+    let app = app().await;
     send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
     send(&app, post("/api/actions", seat("a2", "guest-priya", "t9"))).await;
 
@@ -236,7 +206,7 @@ async fn the_action_log_is_readable_for_anything_that_learns_from_it() {
 
 #[tokio::test]
 async fn the_action_log_can_be_walked_forward() {
-    let app = app();
+    let app = app().await;
     send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
     send(&app, post("/api/actions", seat("a2", "guest-priya", "t9"))).await;
 
@@ -253,7 +223,7 @@ async fn the_action_log_can_be_walked_forward() {
 async fn an_absurd_log_limit_is_clamped_rather_than_honoured() {
     // A caller asking for the whole world should not be able to make the
     // server build an unbounded response.
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/actions/log?limit=999999")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
@@ -261,7 +231,7 @@ async fn an_absurd_log_limit_is_clamped_rather_than_honoured() {
 
 #[tokio::test]
 async fn an_unknown_api_path_is_a_json_404() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/typo")).await;
 
     // The static handler is the router's fallback, and its last candidate is
@@ -278,14 +248,14 @@ async fn an_unknown_api_path_is_a_json_404() {
 
 #[tokio::test]
 async fn an_unknown_guest_is_a_404() {
-    let app = app();
+    let app = app().await;
     let (status, _) = send(&app, get("/api/recommendations/nobody")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn the_menu_is_served_from_the_rust_seed() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/menu")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -299,7 +269,7 @@ async fn the_menu_is_served_from_the_rust_seed() {
 
 #[tokio::test]
 async fn stock_is_part_of_the_pushed_state() {
-    let app = app();
+    let app = app().await;
     let (_, body) = send(&app, get("/api/state")).await;
 
     let carrots = body["state"]["ingredients"]
@@ -314,7 +284,7 @@ async fn stock_is_part_of_the_pushed_state() {
 
 #[tokio::test]
 async fn firing_tickets_depletes_stock_and_takes_the_dish_off_the_menu() {
-    let app = app();
+    let app = app().await;
 
     let step = |id: &str, kind: Value| {
         let mut action = json!({ "id": id, "at": "2026-08-13T10:00:00.000Z" });
@@ -392,7 +362,7 @@ async fn firing_tickets_depletes_stock_and_takes_the_dish_off_the_menu() {
 
 #[tokio::test]
 async fn health_reports_which_integrations_are_configured() {
-    let app = app();
+    let app = app().await;
     let (status, body) = send(&app, get("/api/health")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -402,8 +372,9 @@ async fn health_reports_which_integrations_are_configured() {
     assert_eq!(body["actionsLogged"], 0);
     assert_eq!(body["revision"], 0);
     // A database that failed to migrate is the kind of thing a health check
-    // exists to catch, so the schema version is part of the contract.
-    assert_eq!(body["schemaVersion"], 1);
+    // exists to catch, so the schema version is part of the contract. Bump this
+    // deliberately when a migration is added — that is the point of it.
+    assert_eq!(body["schemaVersion"], 3);
     assert!(
         body["build"]
             .as_str()
@@ -412,14 +383,198 @@ async fn health_reports_which_integrations_are_configured() {
     );
 }
 
+// --- identity -------------------------------------------------------------
+
+#[tokio::test]
+async fn the_floor_is_not_served_to_an_anonymous_caller() {
+    let app = app().await;
+
+    // Every one of these hands over guest names, allergies and dietary needs,
+    // or lets a caller change the service. None of them had any guard at all.
+    for uri in [
+        "/api/state",
+        "/api/menu",
+        "/api/summary",
+        "/api/recommendations/guest-maya",
+        "/api/actions/log",
+        "/api/forecast",
+        "/api/stream",
+    ] {
+        let (status, _) = app.send_anonymous(get(uri)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{uri} must require a session"
+        );
+    }
+
+    let (status, _) = app
+        .send_anonymous(post("/api/actions", seat("a1", "guest-maya", "t2")))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_anonymous_caller_cannot_wipe_the_service() {
+    let app = app().await;
+
+    // The single worst thing an open mutation route allowed: one unauthenticated
+    // POST that discards every party, ticket and stock level on the floor.
+    let (status, _) = app
+        .send_anonymous(post("/api/actions", json!({ "id": "a1", "type": "reset" })))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (_, state) = send(&app, get("/api/state")).await;
+    assert_eq!(state["version"], 0, "nothing should have been applied");
+}
+
+#[tokio::test]
+async fn a_wrong_pin_is_refused_and_issues_no_cookie() {
+    let app = app().await;
+    let response = app
+        .router
+        .clone()
+        .oneshot(post(
+            "/api/auth/login",
+            json!({ "staffId": common::STAFF_ID, "pin": "000000" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response.headers().get("set-cookie").is_none(),
+        "a failed sign-in must not hand out a session"
+    );
+}
+
+#[tokio::test]
+async fn every_action_records_who_performed_it() {
+    let app = app().await;
+    let (status, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, log) = send(&app, get("/api/actions/log")).await;
+    let entry = &log["entries"][0]["action"];
+
+    // The log used to record what happened and never who did it, which is the
+    // one question an audit trail exists to answer.
+    assert_eq!(entry["actor"]["staffId"], common::STAFF_ID);
+    assert_eq!(entry["actor"]["terminalId"], "test");
+}
+
+#[tokio::test]
+async fn the_server_stamps_the_time_and_ignores_the_client_s() {
+    let app = app().await;
+    let (status, _) = send(
+        &app,
+        post(
+            "/api/actions",
+            json!({
+                "id": "a1",
+                // A client claiming a ticket was fired in 1999. Ticket age and
+                // cook time are computed from this, so it used to be worth
+                // lying about.
+                "at": "1999-01-01T00:00:00.000Z",
+                "type": "seat-guest",
+                "guestId": "guest-maya",
+                "tableId": "t2",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, log) = send(&app, get("/api/actions/log")).await;
+    let at = log["entries"][0]["action"]["at"]
+        .as_str()
+        .expect("the action carries a timestamp");
+    assert!(
+        !at.starts_with("1999"),
+        "the server must stamp the time, got {at}"
+    );
+}
+
+#[tokio::test]
+async fn signing_out_ends_the_session() {
+    let app = app().await;
+    let (status, _) = send(&app, get("/api/state")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(&app, post("/api/auth/logout", json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(&app, get("/api/state")).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the cookie must stop working the moment it is revoked"
+    );
+}
+
+#[tokio::test]
+async fn setup_is_refused_once_a_credential_exists() {
+    let app = app().await;
+
+    // The bootstrap route is open by necessity, so it has to close itself.
+    let (status, _) = app
+        .send_anonymous(post(
+            "/api/auth/setup",
+            json!({ "staffId": "manager-1", "pin": "999999" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_server_cannot_do_a_managers_job() {
+    // Sign in as a server rather than the manager the harness uses by default.
+    let app = common::signed_in_as(ember_server::Config::default(), "server-1", "135791").await;
+
+    let (status, body) = app
+        .send(post("/api/actions", json!({ "id": "a1", "type": "reset" })))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("manager")),
+        "the refusal should say what is missing, got {body:?}"
+    );
+
+    // And it must be refused before it touches the floor, not after.
+    let (_, state) = app.send(get("/api/state")).await;
+    assert_eq!(state["version"], 0);
+}
+
+#[tokio::test]
+async fn a_manager_can_do_it() {
+    let app = app().await;
+    let (status, body) = send(
+        &app,
+        post("/api/actions", json!({ "id": "a1", "type": "reset" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    // Reset on an untouched floor changes nothing, which is the honest answer.
+    assert_eq!(body["outcome"], "unchanged");
+}
+
 // --- sponsor guards over HTTP ---------------------------------------------
 
 #[tokio::test]
-async fn a_demo_session_is_issued_with_a_hardened_cookie() {
-    let app = app();
+async fn signing_in_issues_a_hardened_session_cookie() {
+    let app = app().await;
     let response = app
+        .router
         .clone()
-        .oneshot(post("/api/demo-session", json!({})))
+        .oneshot(post(
+            "/api/auth/login",
+            json!({ "staffId": common::STAFF_ID, "pin": common::PIN, "terminalId": "pass" }),
+        ))
         .await
         .unwrap();
 
@@ -431,38 +586,50 @@ async fn a_demo_session_is_issued_with_a_hardened_cookie() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(cookie.contains("HttpOnly"));
-    assert!(cookie.contains("SameSite=Strict"));
+
+    assert!(cookie.starts_with("ember_session="));
     assert!(
-        !cookie.contains("Secure"),
-        "the default config serves plain http, where a Secure cookie would be dropped"
+        cookie.contains("HttpOnly"),
+        "script must not read the session"
     );
+    assert!(cookie.contains("SameSite=Strict"));
+
+    // The token must not be anything a client could have predicted or supplied.
+    let token = cookie
+        .trim_start_matches("ember_session=")
+        .split(';')
+        .next()
+        .unwrap();
+    assert_eq!(token.len(), 64, "expected a 32-byte token in hex");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 #[tokio::test]
-async fn sponsor_routes_require_a_demo_session() {
-    let app = app();
+async fn sponsor_routes_require_a_session() {
+    let app = app().await;
 
-    let (status, _) = send(&app, get("/api/elevenlabs/token")).await;
+    // Unauthenticated: these spend money with a third party, so an anonymous
+    // caller must not reach them.
+    let (status, _) = app.send_anonymous(get("/api/elevenlabs/token")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (status, _) = send(
-        &app,
-        post("/api/tavily/search", json!({ "dishId": "beet-salad" })),
-    )
-    .await;
+    let (status, _) = app
+        .send_anonymous(post(
+            "/api/tavily/search",
+            json!({ "dishId": "beet-salad" }),
+        ))
+        .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn sponsor_routes_reject_cross_site_requests() {
-    let app = app();
+    let app = app().await;
     let request = Request::builder()
         .uri("/api/elevenlabs/token")
         .header("host", "localhost:4000")
         .header("origin", "https://attacker.example")
         .header("sec-fetch-site", "cross-site")
-        .header("cookie", SESSION)
         .body(Body::empty())
         .unwrap();
 
@@ -472,11 +639,10 @@ async fn sponsor_routes_reject_cross_site_requests() {
 
 #[tokio::test]
 async fn an_unconfigured_elevenlabs_key_degrades_to_typing() {
-    let app = app();
+    let app = app().await;
     let request = Request::builder()
         .uri("/api/elevenlabs/token")
         .header("host", "localhost:4000")
-        .header("cookie", SESSION)
         .body(Body::empty())
         .unwrap();
 
@@ -487,13 +653,12 @@ async fn an_unconfigured_elevenlabs_key_degrades_to_typing() {
 
 #[tokio::test]
 async fn an_unconfigured_tavily_key_returns_the_seeded_fallback() {
-    let app = app();
+    let app = app().await;
     let request = Request::builder()
         .method("POST")
         .uri("/api/tavily/search")
         .header("host", "localhost:4000")
         .header("content-type", "application/json")
-        .header("cookie", SESSION)
         .body(Body::from(json!({ "dishId": "beet-salad" }).to_string()))
         .unwrap();
 
@@ -505,13 +670,12 @@ async fn an_unconfigured_tavily_key_returns_the_seeded_fallback() {
 
 #[tokio::test]
 async fn an_unknown_dish_is_a_404() {
-    let app = app();
+    let app = app().await;
     let request = Request::builder()
         .method("POST")
         .uri("/api/tavily/search")
         .header("host", "localhost:4000")
         .header("content-type", "application/json")
-        .header("cookie", SESSION)
         .body(Body::from(json!({ "dishId": "no-such-dish" }).to_string()))
         .unwrap();
 
@@ -523,12 +687,19 @@ async fn an_unknown_dish_is_a_404() {
 
 #[tokio::test]
 async fn the_event_stream_opens_with_the_current_state_and_then_pushes_changes() {
-    let state = AppState::new(Config::default()).unwrap();
-    let app = ember_server::router(state.clone());
+    let app = app().await;
 
+    // The stream carries the whole floor, allergies included, so it needs a
+    // session like everything else.
+    let mut opening = get("/api/stream");
+    opening.headers_mut().insert(
+        axum::http::header::COOKIE,
+        app.session.parse().expect("a well-formed cookie"),
+    );
     let response = app
+        .router
         .clone()
-        .oneshot(get("/api/stream"))
+        .oneshot(opening)
         .await
         .expect("stream opens");
     assert_eq!(response.status(), StatusCode::OK);
@@ -548,12 +719,8 @@ async fn the_event_stream_opens_with_the_current_state_and_then_pushes_changes()
     assert!(first.contains("\"version\":0"), "{first}");
 
     // Apply an action through the API and expect it to arrive on the stream.
-    let seated = app
-        .clone()
-        .oneshot(post("/api/actions", seat("a1", "guest-maya", "t2")))
-        .await
-        .unwrap();
-    assert_eq!(seated.status(), StatusCode::OK);
+    let (status, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    assert_eq!(status, StatusCode::OK);
 
     let pushed = next_event(&mut body).await;
     assert!(pushed.contains("\"version\":1"), "{pushed}");
@@ -575,7 +742,7 @@ async fn next_event(stream: &mut axum::body::BodyDataStream) -> String {
 
 #[tokio::test]
 async fn a_full_service_runs_from_arrival_to_sent_order() {
-    let app = app();
+    let app = app().await;
 
     let step = |id: &str, kind: Value| {
         let mut action = json!({ "id": id, "at": "2026-08-13T10:00:00.000Z" });

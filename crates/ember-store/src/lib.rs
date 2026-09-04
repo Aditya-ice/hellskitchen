@@ -6,6 +6,8 @@
 //! trail and the training data the Python services will later learn from, which
 //! is why nothing in here ever updates or deletes a row in it.
 
+pub mod auth;
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -20,6 +22,10 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("store mutex was poisoned")]
     Poisoned,
+    #[error("a PIN must be 4 to 12 digits")]
+    WeakPin,
+    #[error("could not hash or verify a credential")]
+    PasswordHash,
     #[error(
         "database is at schema version {found}, but this build only knows {known}; \
          it was written by a newer version of Ember POS"
@@ -81,9 +87,10 @@ struct Migration {
 /// Migration 0 keeps `IF NOT EXISTS` deliberately: databases created before
 /// this runner existed already have these tables and a `user_version` of 0, so
 /// replaying it over them has to be a no-op rather than an error.
-const MIGRATIONS: &[Migration] = &[Migration {
-    name: "initial schema",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "initial schema",
+        sql: r#"
 CREATE TABLE IF NOT EXISTS actions (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
     id      TEXT NOT NULL UNIQUE,
@@ -100,7 +107,46 @@ CREATE TABLE IF NOT EXISTS snapshot (
     state   TEXT NOT NULL
 );
 "#,
-}];
+    },
+    Migration {
+        name: "staff credentials and terminal sessions",
+        sql: r#"
+CREATE TABLE staff_credentials (
+    staff_id     TEXT PRIMARY KEY,
+    pin_hash     TEXT NOT NULL,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    updated_at   TEXT NOT NULL
+);
+
+-- Sessions are stored by the SHA-256 of the token, never the token itself, so
+-- a copy of this database does not hand anyone a working session.
+CREATE TABLE sessions (
+    token_hash   TEXT PRIMARY KEY,
+    staff_id     TEXT NOT NULL,
+    terminal_id  TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
+);
+
+CREATE INDEX sessions_expires_idx ON sessions (expires_at);
+"#,
+    },
+    Migration {
+        name: "record who performed each action",
+        sql: r#"
+-- The log recorded what happened and never who did it, so the audit trail
+-- could not answer the one question an audit trail exists for. Existing rows
+-- keep NULL: those actions genuinely have no known actor, and inventing one
+-- would be worse than admitting it.
+ALTER TABLE actions ADD COLUMN actor_staff_id TEXT;
+ALTER TABLE actions ADD COLUMN terminal_id TEXT;
+-- `at` is the client's claim; this is when the server actually took it.
+ALTER TABLE actions ADD COLUMN received_at TEXT;
+"#,
+    },
+];
 
 pub struct Store {
     connection: Mutex<rusqlite::Connection>,
@@ -229,13 +275,23 @@ impl Store {
         };
         let version = current.version + 1;
 
+        // actor and received_at are columns as well as being inside the payload:
+        // an audit query should not have to parse JSON to answer "what did this
+        // person do tonight".
         transaction.execute(
-            "INSERT INTO actions (id, at, kind, payload) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO actions (id, at, kind, payload, actor_staff_id, terminal_id, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 &action.id,
                 &action.at,
                 action.kind.label(),
                 serde_json::to_string(action)?,
+                action.actor.as_ref().map(|actor| actor.staff_id.as_str()),
+                action
+                    .actor
+                    .as_ref()
+                    .map(|actor| actor.terminal_id.as_str()),
+                chrono::Utc::now().to_rfc3339(),
             ),
         )?;
         transaction.execute(
@@ -286,6 +342,7 @@ mod tests {
         Action {
             id: id.into(),
             at: "2026-08-13T10:00:00.000Z".into(),
+            actor: None,
             kind,
         }
     }

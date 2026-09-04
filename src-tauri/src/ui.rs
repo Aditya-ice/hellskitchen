@@ -180,6 +180,7 @@ mod tests {
             &Action {
                 id: id.into(),
                 at: "2026-08-13T10:00:00.000Z".into(),
+                actor: None,
                 kind,
             },
         )

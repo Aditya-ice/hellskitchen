@@ -14,6 +14,13 @@ serde_json = "1"
 ts-rs = "12"
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Staff PINs are low-entropy by nature, so the hash is only half the defence;
+# see the lockout in ember-store::auth for the other half.
+argon2 = "0.5"
+# Pinned to the rand_core that argon2's password-hash uses, with getrandom
+# enabled -- OsRng is compiled out otherwise.
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
 thiserror = "2"
 ember-core = { path = "crates/ember-core" }
 ember-store = { path = "crates/ember-store" }

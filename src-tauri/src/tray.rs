@@ -93,6 +93,7 @@ mod tests {
             &Action {
                 id: id.into(),
                 at: chrono::Utc::now().to_rfc3339(),
+                actor: None,
                 kind,
             },
         )

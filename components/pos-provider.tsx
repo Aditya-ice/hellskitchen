@@ -20,15 +20,17 @@ import type {
   StaffMember,
   Table,
 } from "@/lib/domain";
-import type { Action } from "@/lib/generated/Action";
 import type { Rejection } from "@/lib/generated/Rejection";
+import type { ActionInput, ActionRequest, Identity } from "@/lib/pos-client";
 import {
-  ensureDemoSession,
   fetchMenu,
   fetchForecast,
   fetchRecommendations,
   fetchSummary,
+  fetchIdentity,
+  logout,
   newAction,
+  NotAuthenticatedError,
   newWalkIn,
   postAction,
   subscribeToState,
@@ -129,6 +131,17 @@ interface PosContextValue {
   menuFailed: boolean;
   retryMenu: () => void;
 
+  /** Whether this terminal is signed in. `null` until the first answer. */
+  authenticated: boolean | null;
+  /** True when a session that *was* working stopped working. */
+  sessionEnded: boolean;
+  /** Re-reads everything, after signing in. */
+  reload: () => void;
+  /** Ends the session and returns the terminal to the keypad. */
+  signOut: () => void;
+  /** Who is signed in, for attribution in the UI. */
+  identity: Identity | null;
+
   // reference data, served by the same Rust seed the engine scores against
   restaurant: Restaurant;
   menuItems: MenuItem[];
@@ -158,7 +171,6 @@ interface PosContextValue {
   completeOrder: (orderId: string) => void;
   /** Books a delivery in. Additive, so concurrent restocks add up. */
   restockIngredient: (ingredientId: string, quantity: number) => void;
-  resetDemo: () => void;
 }
 
 const PosContext = createContext<PosContextValue | null>(null);
@@ -181,6 +193,21 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [pending, setPending] = useState(0);
   const [menuFailed, setMenuFailed] = useState(false);
   const [menuAttempt, setMenuAttempt] = useState(0);
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [sessionEnded, setSessionEnded] = useState(false);
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  /** Bumped to re-run every read after signing in. */
+  const [generation, setGeneration] = useState(0);
+
+  // One place decides the terminal is signed out, so a 401 from any read has
+  // the same effect: back to the keypad, with the reason preserved.
+  const handleAuthFailure = useCallback(() => {
+    setAuthenticated((was) => {
+      if (was) setSessionEnded(true);
+      return false;
+    });
+    setIdentity(null);
+  }, []);
 
   // Monotonic, so two identical messages in a row are still two notices and the
   // second one re-announces rather than looking like the first never cleared.
@@ -228,6 +255,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((caught: unknown) => {
         if (controller.signal.aborted) return;
+        if (caught instanceof NotAuthenticatedError) {
+          handleAuthFailure();
+          return;
+        }
         setMenuFailed(true);
         announce({
           kind: "failed",
@@ -245,9 +276,39 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [menuAttempt, announce]);
+  }, [menuAttempt, generation, announce, handleAuthFailure]);
 
   const retryMenu = useCallback(() => setMenuAttempt((n) => n + 1), []);
+
+  const reload = useCallback(() => {
+    setSessionEnded(false);
+    setAuthenticated(true);
+    setGeneration((n) => n + 1);
+  }, []);
+
+  const signOut = useCallback(() => {
+    void logout().finally(() => {
+      setAuthenticated(false);
+      setSessionEnded(false);
+      setIdentity(null);
+    });
+  }, []);
+
+  // Who is at this terminal. Also the first thing that tells us whether the
+  // session is live, before any of the floor reads run.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchIdentity(controller.signal)
+      .then((state) => {
+        setAuthenticated(state.authenticated);
+        setIdentity(state.identity ?? null);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        if (caught instanceof NotAuthenticatedError) handleAuthFailure();
+      });
+    return () => controller.abort();
+  }, [generation, handleAuthFailure]);
 
   // The stream replays the current revision on connect, so this both hydrates
   // and keeps us live. No separate initial fetch is needed.
@@ -334,7 +395,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       : emptyInsight;
 
   const dispatch = useCallback(
-    (action: Action) => {
+    (action: ActionInput & ActionRequest) => {
       setPending((n) => n + 1);
       postAction(action)
         .then((outcome) => {
@@ -354,6 +415,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           }
         })
         .catch((caught: unknown) => {
+          if (caught instanceof NotAuthenticatedError) {
+            handleAuthFailure();
+            return;
+          }
           announce({
             kind: "failed",
             message:
@@ -364,7 +429,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         })
         .finally(() => setPending((n) => Math.max(0, n - 1)));
     },
-    [applyRevision, announce],
+    [applyRevision, announce, handleAuthFailure],
   );
 
   const selectGuest = useCallback((id: string) => setSelectedGuestId(id), []);
@@ -444,19 +509,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     [dispatch],
   );
 
-  const resetDemo = useCallback(() => {
-    setSelectedGuestId(null);
-    dispatch(newAction({ type: "reset" }));
-  }, [dispatch]);
-
-  // Sponsor routes need a session cookie; ask for it once, up front, so the
-  // first voice note does not pay for the round trip.
-  useEffect(() => {
-    ensureDemoSession().catch(() => {
-      // Voice and dish context fall back on their own if this never succeeds.
-    });
-  }, []);
-
   const value = useMemo<PosContextValue>(
     () => ({
       tables: state.tables,
@@ -470,6 +522,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       pending,
       menuFailed,
       retryMenu,
+      authenticated,
+      sessionEnded,
+      reload,
+      signOut,
+      identity,
       restaurant: menu.restaurant,
       menuItems: menu.menuItems,
       staff: menu.staff,
@@ -489,7 +546,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       sendOrder,
       completeOrder,
       restockIngredient,
-      resetDemo,
     }),
     [
       state,
@@ -500,6 +556,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       pending,
       menuFailed,
       retryMenu,
+      authenticated,
+      sessionEnded,
+      reload,
+      signOut,
+      identity,
       menu,
       activeInsight,
       summary,
@@ -516,7 +577,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       sendOrder,
       completeOrder,
       restockIngredient,
-      resetDemo,
     ],
   );
 

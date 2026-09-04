@@ -18,12 +18,33 @@ use crate::domain::*;
 use crate::engine::seating_obstacle;
 use crate::seed;
 
+/// Who performed an action, and at which screen.
+///
+/// The action log recorded what happened and never who did it, so it could not
+/// answer the one question an audit trail exists to answer. This is stamped
+/// server-side from the session and is never accepted from a client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Actor {
+    pub staff_id: String,
+    /// Which terminal: the pass and the host stand are different screens even
+    /// when the same person is signed in at both.
+    pub terminal_id: String,
+}
+
 /// An action plus the identity and timestamp assigned when it was created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Action {
     pub id: String,
     pub at: String,
+    /// Who performed this, stamped by the server from the session.
+    ///
+    /// `None` only for actions logged before identity existed — those genuinely
+    /// have no known actor, and inventing one would be worse than saying so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<Actor>,
     #[serde(flatten)]
     #[ts(flatten)]
     pub kind: ActionKind,
@@ -492,6 +513,7 @@ mod tests {
         Action {
             id: "test-action".into(),
             at: "2026-08-13T10:00:00.000Z".into(),
+            actor: None,
             kind,
         }
     }
@@ -929,6 +951,7 @@ mod tests {
             &Action {
                 id: "second-send".into(),
                 at: "2026-08-13T10:05:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::SendOrder {
                     guest_id: "guest-maya".into(),
                 },
@@ -1052,6 +1075,7 @@ mod tests {
             &Action {
                 id: id.into(),
                 at: "2026-08-13T10:30:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::CompleteOrder {
                     order_id: order_id.into(),
                 },
@@ -1205,6 +1229,7 @@ mod tests {
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "beet-salad".into(),
@@ -1244,6 +1269,7 @@ mod tests {
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),
@@ -1287,6 +1313,7 @@ mod tests {
                 &Action {
                     id: format!("a{index}"),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),
@@ -1333,6 +1360,7 @@ mod tests {
             &Action {
                 id: action_id.into(),
                 at: "2026-08-13T11:00:00.000Z".into(),
+                actor: None,
                 kind: ActionKind::RestockIngredient {
                     ingredient_id: id.into(),
                     quantity,
@@ -1376,6 +1404,7 @@ mod tests {
                 &Action {
                     id: id.into(),
                     at: "2026-08-13T10:00:00.000Z".into(),
+                    actor: None,
                     kind: ActionKind::AddOrderItem {
                         guest_id: "guest-maya".into(),
                         menu_item_id: "salmon-carrot".into(),

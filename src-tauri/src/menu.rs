@@ -1,16 +1,18 @@
 //! Application menu and its keyboard shortcuts.
 //!
-//! Menu items that change the service (Reset) act on the server directly rather
-//! than asking the web page to do it — the resulting revision then reaches
-//! every open window, including the Kitchen display, through the same broadcast
-//! any other client would get. Items that only move the UI emit an event to the
-//! focused window.
+//! Every item here only moves the UI: it emits an event to the window and lets
+//! the page act on it. Nothing in this menu changes the service.
+//!
+//! There used to be a "Reset Demo Service" item on ⌘R that wiped the floor —
+//! every party, every open ticket, the larder — on every connected window at
+//! once, with no confirmation, bound to the shortcut people press to reload a
+//! page. Resetting a live service is not a menu-bar action, and ⌘R is the last
+//! accelerator it should have had.
 
-use ember_core::{Action, ActionKind};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Emitter, Wry};
 
-use crate::{ui, Desktop};
+use crate::ui;
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let tabs = [
@@ -33,14 +35,6 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .item(
             &MenuItemBuilder::with_id("window:kitchen", "Kitchen Display")
                 .accelerator("CmdOrCtrl+K")
-                .build(app)?,
-        )
-        .build()?;
-
-    let service = SubmenuBuilder::new(app, "Service")
-        .item(
-            &MenuItemBuilder::with_id("service:reset", "Reset Demo Service")
-                .accelerator("CmdOrCtrl+R")
                 .build(app)?,
         )
         .build()?;
@@ -68,7 +62,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[&application, &edit, &service, &view])
+        .items(&[&application, &edit, &view])
         .build()?;
 
     app.set_menu(menu)?;
@@ -86,36 +80,9 @@ fn handle_event(app: &AppHandle<Wry>, event: tauri::menu::MenuEvent) {
         return;
     }
 
-    match id {
-        "window:kitchen" => {
-            if let Err(error) = ui::open_kitchen_window(app) {
-                eprintln!("could not open the Kitchen display: {error}");
-            }
+    if id == "window:kitchen" {
+        if let Err(error) = ui::open_kitchen_window(app) {
+            eprintln!("could not open the Kitchen display: {error}");
         }
-        "service:reset" => reset_service(app),
-        _ => {}
     }
-}
-
-/// Applies a reset the same way any client would: through the store, so it is
-/// logged, versioned, and broadcast to every window.
-fn reset_service(app: &AppHandle) {
-    let Some(desktop) = app.try_state::<Desktop>() else {
-        return;
-    };
-    let action = Action {
-        id: uuid_v4(),
-        at: chrono::Utc::now().to_rfc3339(),
-        kind: ActionKind::Reset,
-    };
-
-    // Goes through the same path a browser client would, so it is logged,
-    // versioned and pushed to every open window.
-    if let Err(error) = desktop.server.apply(&action) {
-        eprintln!("reset failed: {error}");
-    }
-}
-
-fn uuid_v4() -> String {
-    uuid::Uuid::new_v4().to_string()
 }
