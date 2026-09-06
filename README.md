@@ -4,6 +4,8 @@ Ember POS is a guest-focused, AI-assisted front-of-house prototype. It helps a h
 
 ## What the demo does
 
+- Signs staff in by PIN on a shared terminal, and records every action against
+  whoever performed it.
 - Manages expected guests, check-ins, and walk-ins.
 - Scores tables using party size, accessibility, seating preference, wait time, and server load.
 - Surfaces guest history, dietary needs, allergies, likes, and service notes.
@@ -13,6 +15,7 @@ Ember POS is a guest-focused, AI-assisted front-of-house prototype. It helps a h
 - Uses Tavily for optional, source-linked dish background.
 - Offers a lightweight Stay22 map for guests who need nearby accommodation.
 - Keeps every open surface on one live floor, and keeps the service across restarts.
+- Enforces the allergen and dietary rules on the server, not only in the browser.
 
 The recommendation engine assists staff; it does not replace allergy verification or staff judgment.
 
@@ -47,7 +50,17 @@ and nothing else. Restocking is additive rather than "set to N", so two people
 booking in a delivery at once add up instead of overwriting each other.
 
 Hard safety rules — allergens, dietary conflicts, unavailable stock — live in
-`ember-core` and gate every recommendation. Nothing downstream may reverse that.
+`ember-core` as a single function, `engine::dish_obstacle`. The ranking calls it
+to decide what a guest may be shown, and the reducer calls it again before a
+line reaches a check, so a dish that is blocked on screen cannot be ordered
+through the API by a second terminal, a replayed action, or a direct POST. A
+test walks every guest against every dish in the seed and asserts the two paths
+agree.
+
+Allergens and dietary conflicts are re-checked when the ticket is fired, because
+a guest's allergy record can be corrected after the order was started. Stock is
+deliberately not: the last portion going while a party was choosing is not a
+reason to strand them.
 
 ## Model services
 
@@ -106,14 +119,16 @@ npm install
 cp .env.example .env.local
 ```
 
+`EMBER_DB` is required — the server refuses to start without it rather than
+keeping the whole service in memory and losing it on the next restart. Set
+`EMBER_EPHEMERAL=1` if an in-memory run is genuinely what you want.
+
 Run the server and the UI in two terminals:
 
 ```bash
 npm run dev:server   # ember-server on :4000
 npm run dev          # next dev on :3000, proxying /api/* to :4000
 ```
-
-Open [http://localhost:3000](http://localhost:3000), then choose **Open the live POS**.
 
 To run it the way it ships — one binary serving the built UI and the API:
 
@@ -123,6 +138,35 @@ npm start            # builds both, serves on :4000
 
 Anything else on your network can then open `http://<your-ip>:4000` and share the
 same floor.
+
+### Signing in
+
+Nothing is reachable without a staff session: the floor, the menu and the event
+stream all carry guest names, allergies and dietary needs, and every action is
+recorded against whoever performed it.
+
+On a terminal where nobody has a PIN yet, the server prints a one-time setup
+code at startup:
+
+```
+WARN ember_server: FIRST RUN — nobody has a PIN yet. Setup code for the first
+manager: a17683212c700296…
+```
+
+Open the app, enter that code with a manager's staff id (`manager-1` in the
+seeded roster) and a 4–12 digit PIN. The code is required because this route
+cannot ask who you are — there is nobody to be yet — so without it whoever
+reached the port first would become the manager. It is spent as soon as the
+first PIN is set. `EMBER_SETUP_TOKEN` pins it to a known value when provisioning
+from a script.
+
+After that, a manager adds everyone else from **Staff PINs** in the header.
+Five wrong attempts lock an account for five minutes; a manager resetting the
+PIN clears the lockout, and also signs that person out of every terminal.
+
+Sessions expire after 30 minutes idle. Serve over https and set
+`EMBER_SECURE_COOKIES=1` in a venue — otherwise the session cookie travels in
+the clear and anyone on the same network can lift it.
 
 ## macOS app
 
@@ -146,8 +190,7 @@ What the native shell adds over a browser tab:
   party is still sitting there eating.
 - **Notifications** — when an order is fired, and when a party with recorded
   allergies is seated.
-- **⌘1–⌘4** to move between Arrivals, Floor, Order and Guest; **⌘R** to reset
-  the demo service.
+- **⌘1–⌘4** to move between Arrivals, Floor, Order and Guest.
 
 `bundle.targets` is `["app"]`. Adding `"dmg"` also works, but `bundle_dmg.sh`
 drives Finder through AppleScript and needs Automation permission granted to
@@ -165,6 +208,7 @@ npm run lint
 npm run typecheck
 npm test          # UI client layer
 npm run test:rust # engine, reducer, store, server
+npm run test:e2e  # a service end to end, in a real browser
 
 cd services/brain && uv run pytest   # floor agent
 ```
@@ -174,14 +218,23 @@ languages cannot drift.
 
 ## Loom demo script
 
-1. Open **Arrivals** and select Maya Chen. Point out the tree-nut allergy, gluten-free need, anniversary note, and window/accessibility preferences.
-2. Show the table recommendations. Explain why T2 scores highest, then seat Maya there.
-3. Open a second window side by side and seat a party in one — it appears in the other immediately, with no reload.
-4. Open **Order**. Show that unsafe or incompatible dishes are blocked, while available dishes are ranked with plain-language reasons.
-5. Add the Golden Beet & Citrus and Cedar Salmon. Mention the live warning that carrots are running low.
-6. Dictate an order note with ElevenLabs, or type it if no API key is configured, then send the order.
-7. Open **Dish context** to show Tavily's source-linked web context and the allergy disclaimer.
-8. Open **Guest concierge** to show the Stay22 accommodation map.
-9. Return to **Guest** to show saved notes, the current check, and the activity trail.
-
-Use **Reset demo** in the POS header to restore the seeded state before another recording.
+1. Start the server, take the setup code from its first log line, and set the
+   first manager PIN. Point out that this is the only thing standing between a
+   fresh venue machine and whoever else is on its network.
+2. Open **Arrivals** and select Maya Chen. Point out the tree-nut allergy,
+   gluten-free need, anniversary note, and window/accessibility preferences.
+3. Show the table recommendations. Explain why T2 scores highest, then seat Maya
+   there.
+4. Open a second window side by side and seat a party in one — it appears in the
+   other immediately, with no reload.
+5. Open **Order**. The Charred Carrot Tartare is blocked for her and says why.
+   That rule is enforced in `ember-core`, not in the browser: a second terminal
+   posting the same order directly is refused too.
+6. Add the Golden Beet & Citrus and Cedar Salmon. Mention the live warning that
+   carrots are running low.
+7. Dictate an order note with ElevenLabs, or type it if no API key is
+   configured, then send the order.
+8. Open **Dish context** to show Tavily's source-linked web context and the
+   allergy disclaimer.
+9. Return to **Guest** to show saved notes, the current check, and the activity
+   trail — every entry attributed to whoever is signed in.
