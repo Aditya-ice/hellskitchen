@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Accessibility,
   Armchair,
@@ -15,7 +15,8 @@ import {
   Minus,
   Plus,
   ReceiptText,
-  RotateCcw,
+  LogOut,
+  WifiOff,
   Search,
   ShieldAlert,
   Sparkles,
@@ -24,12 +25,17 @@ import {
   Users,
   UtensilsCrossed,
 } from "lucide-react";
-import { ingredients, menuItems, staff } from "@/data/demo";
-import { orderTotal, recommendDishes, recommendTables } from "@/lib/decision-engine";
 import type { GuestProfile, TableStatus } from "@/lib/domain";
+import { formatMoney } from "@/lib/format";
 import { usePos } from "@/components/pos-provider";
 import { VoiceInput } from "@/components/voice-input";
+import { FloorAgent } from "@/components/floor-agent";
 import { GuestTools } from "@/components/guest-tools";
+import { LarderPanel } from "@/components/larder-panel";
+import { StaffPins } from "@/components/staff-pins";
+import { useTodayLabel } from "@/lib/clock";
+import { onDesktopTabChange } from "@/lib/desktop";
+import { isLockedOrder, orderStageLabel } from "@/lib/orders";
 
 type Tab = "arrivals" | "floor" | "order" | "guest";
 
@@ -63,6 +69,14 @@ function StatusPill({ status }: { status: GuestProfile["status"] }) {
 
 export function PosShell() {
   const pos = usePos();
+  const todayLabel = useTodayLabel();
+  // Bound to the venue's currency once, rather than a "$" hardcoded at each
+  // of the four places a price is rendered.
+  const money = useCallback(
+    (cents: number) => formatMoney(cents, pos.restaurant.currency || "USD"),
+    [pos.restaurant.currency],
+  );
+
   const [activeTab, setActiveTab] = useState<Tab>("arrivals");
   const [search, setSearch] = useState("");
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -76,9 +90,7 @@ export function PosShell() {
     (table) => table.seatedGuestId === selectedGuest?.id,
   );
   const selectedOrder = pos.orders.find((order) => order.guestId === selectedGuest?.id);
-  const tableRecommendations = selectedGuest
-    ? recommendTables(selectedGuest, pos.tables)
-    : [];
+  const tableRecommendations = pos.insight.tables;
   const seatableRecommendations = tableRecommendations.filter(
     (recommendation) =>
       recommendation.eligible &&
@@ -89,7 +101,7 @@ export function PosShell() {
           table.seatedGuestId === null,
       ),
   );
-  const dishRecommendations = selectedGuest ? recommendDishes(selectedGuest) : [];
+  const dishRecommendations = pos.insight.dishes;
 
   const filteredGuests = useMemo(
     () =>
@@ -99,11 +111,20 @@ export function PosShell() {
     [pos.guests, search],
   );
 
-  const visibleMenu = menuItems.filter(
+  const visibleMenu = pos.menuItems.filter(
     (item) => menuSection === "all" || item.section === menuSection,
   );
-  const openTables = pos.tables.filter((table) => table.status === "available").length;
-  const waitingGuests = pos.guests.filter((guest) => guest.status === "waiting");
+
+  // The macOS app's View menu drives the same tabs from the keyboard.
+  useEffect(
+    () =>
+      onDesktopTabChange((tab) => {
+        if (tabs.some((candidate) => candidate.id === tab)) {
+          setActiveTab(tab as Tab);
+        }
+      }),
+    [],
+  );
 
   function chooseGuest(id: string, tab?: Tab) {
     pos.selectGuest(id);
@@ -134,32 +155,58 @@ export function PosShell() {
       <div className="border-b border-line bg-white">
         <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <div>
-            <p className="eyebrow text-accent">Sunday dinner · August 9</p>
+            <p className="eyebrow text-accent">
+              {[pos.restaurant.serviceLabel, todayLabel].filter(Boolean).join(" · ")}
+            </p>
             <h1 className="mt-1 text-xl font-black tracking-tight sm:text-2xl">
               Front-of-house workspace
             </h1>
           </div>
           <div className="hidden items-center gap-5 md:flex">
             <div>
-              <p className="text-xl font-black">{waitingGuests.length}</p>
+              <p className="text-xl font-black">{pos.summary.waitingGuests}</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Waiting</p>
             </div>
             <div>
-              <p className="text-xl font-black">{openTables}</p>
+              <p className="text-xl font-black">{pos.summary.openTables}</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Open tables</p>
             </div>
             <div>
-              <p className="text-xl font-black">12m</p>
+              <p className="text-xl font-black">{pos.summary.averageWaitMinutes}m</p>
               <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Avg wait</p>
             </div>
+            {pos.connected ? null : (
+              <span
+                className="flex items-center gap-1.5 rounded-full bg-warning/12 px-3 py-2 text-xs font-black text-[#8a5b06]"
+                title="Reconnecting to the service. The floor may have moved since this was last updated."
+              >
+                <WifiOff className="size-3.5" /> Offline
+              </span>
+            )}
+            <FloorAgent />
             <GuestTools />
-            <button
-              type="button"
-              onClick={pos.resetDemo}
-              className="flex items-center gap-2 rounded-full border border-line px-3 py-2 text-xs font-black hover:border-foreground"
-            >
-              <RotateCcw className="size-3.5" /> Reset demo
-            </button>
+            <StaffPins />
+            {/* Who the floor is recording actions against. This replaced a
+                "Reset demo" button that wiped the entire service on one click,
+                with no confirmation, sitting in the same row as the tools
+                people reach for mid-service. */}
+            {pos.identity ? (
+              <div className="flex items-center gap-2">
+                <div className="text-right">
+                  <p className="text-xs font-black leading-tight">{pos.identity.name}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
+                    {pos.identity.role}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={pos.signOut}
+                  className="flex items-center gap-2 rounded-full border border-line px-3 py-2 text-xs font-black hover:border-foreground"
+                >
+                  <LogOut className="size-3.5" aria-hidden="true" /> Sign out
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -343,7 +390,12 @@ export function PosShell() {
                       </div>
                       <div className="space-y-3 p-4">
                         {seatableRecommendations.slice(0, 3).map((recommendation, index) => {
-                          const table = pos.tables.find((item) => item.id === recommendation.id)!;
+                          const table = pos.tables.find((item) => item.id === recommendation.id);
+                          // Scores and tables arrive from two different
+                          // endpoints, so for a frame after a table is removed
+                          // they disagree. Skipping the row beats asserting and
+                          // taking the whole app down with it.
+                          if (!table) return null;
                           return (
                             <div key={table.id} className={`rounded-xl border p-3 ${index === 0 ? "border-success bg-success/5" : "border-line"}`}>
                               <div className="flex items-center justify-between">
@@ -450,7 +502,8 @@ export function PosShell() {
                 </p>
                 <div className="mt-4 space-y-2">
                   {seatableRecommendations.slice(0, 4).map((recommendation) => {
-                    const table = pos.tables.find((item) => item.id === recommendation.id)!;
+                    const table = pos.tables.find((item) => item.id === recommendation.id);
+                    if (!table) return null;
                     return (
                       <button
                         key={table.id}
@@ -472,7 +525,7 @@ export function PosShell() {
               <div className="card p-5">
                 <p className="eyebrow text-ink-muted">Server sections</p>
                 <div className="mt-4 space-y-3">
-                  {staff.filter((member) => member.role === "server").map((server) => {
+                  {pos.staff.filter((member) => member.role === "server").map((server) => {
                     const count = pos.tables.filter((table) => table.serverId === server.id && table.status === "occupied").length;
                     return (
                       <div key={server.id} className="flex items-center justify-between">
@@ -516,15 +569,29 @@ export function PosShell() {
                     </div>
                   )}
                   <div className="mt-4">
-                    <p className="text-xs font-black">AI picks for this guest</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-black">AI picks for this guest</p>
+                      {pos.insight.rankedBy === "model" && (
+                        // Only shown when the brain actually reranked. The
+                        // engine's own ordering must never be dressed up as
+                        // something it is not.
+                        <span
+                          className="rounded-full bg-navy/8 px-2 py-0.5 text-[10px] font-black text-navy"
+                          title="Reordered using what has actually been ordered tonight. Safety decisions are still the engine's."
+                        >
+                          Learned
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-2 space-y-2">
                       {dishRecommendations.filter((item) => item.eligible).slice(0, 3).map((recommendation, index) => {
-                        const item = menuItems.find((menuItem) => menuItem.id === recommendation.id)!;
+                        const item = pos.menuItems.find((menuItem) => menuItem.id === recommendation.id);
+                        if (!item) return null;
                         return (
                           <button
                             key={item.id}
                             type="button"
-                            disabled={!selectedTable || selectedOrder?.status === "sent"}
+                            disabled={!selectedTable || isLockedOrder(selectedOrder)}
                             onClick={() => pos.addOrderItem(selectedGuest.id, item.id)}
                             className="w-full rounded-xl border border-line p-3 text-left hover:border-accent disabled:opacity-50"
                           >
@@ -543,6 +610,7 @@ export function PosShell() {
                   </div>
                 </div>
               )}
+              <LarderPanel />
             </aside>
 
             <section className="card overflow-hidden">
@@ -569,7 +637,7 @@ export function PosShell() {
               <div className="grid gap-3 p-4 sm:grid-cols-2">
                 {visibleMenu.map((item) => {
                   const recommendation = dishRecommendations.find((entry) => entry.id === item.id);
-                  const lowIngredients = ingredients.filter(
+                  const lowIngredients = pos.ingredients.filter(
                     (ingredient) =>
                       item.ingredientIds.includes(ingredient.id) &&
                       ingredient.onHand / ingredient.par <= 0.25,
@@ -581,7 +649,7 @@ export function PosShell() {
                           <p className="font-black">{item.name}</p>
                           <p className="mt-1 text-xs leading-5 text-ink-muted">{item.description}</p>
                         </div>
-                        <p className="font-black">${item.price}</p>
+                        <p className="font-black">{money(item.priceCents)}</p>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-1.5">
                         {item.tags.map((tag) => (
@@ -605,7 +673,7 @@ export function PosShell() {
                         </span>
                         <button
                           type="button"
-                          disabled={!selectedGuest || !selectedTable || !recommendation?.eligible || selectedOrder?.status === "sent"}
+                          disabled={!selectedGuest || !selectedTable || !recommendation?.eligible || isLockedOrder(selectedOrder)}
                           onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
                           className="grid size-8 place-items-center rounded-full bg-navy text-white hover:bg-accent disabled:bg-surface-muted disabled:text-ink-muted"
                           aria-label={`Add ${item.name}`}
@@ -638,32 +706,53 @@ export function PosShell() {
                 ) : (
                   <div className="space-y-3">
                     {selectedOrder.lines.map((line) => {
-                      const item = menuItems.find((menuItem) => menuItem.id === line.menuItemId)!;
+                      const item = pos.menuItems.find((menuItem) => menuItem.id === line.menuItemId);
+                      const label = line.nameSnapshot ?? item?.name ?? line.menuItemId;
                       return (
                         <div key={line.menuItemId} className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-sm font-black">{item.name}</p>
-                            <p className="mt-0.5 text-xs text-ink-muted">${item.price} each</p>
+                            {/* The line stays on the check even when the menu
+                                failed to load: dropping it would understate
+                                what the party is being charged for. */}
+                            <p className="text-sm font-black">{label}</p>
+                            <p className="mt-0.5 text-xs text-ink-muted">
+                              {/* The line's own recorded price, not the menu's:
+                                  a dish repriced mid-service must not restate
+                                  what this party was quoted. */}
+                              {line.unitPriceCents !== null &&
+                              line.unitPriceCents !== undefined
+                                ? `${money(line.unitPriceCents)} each`
+                                : item
+                                  ? `${money(item.priceCents)} each`
+                                  : "Price unavailable"}
+                            </p>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1">
+                            {/* 44px hit areas around a 24px control: these are
+                                the most-tapped buttons in the app and they are
+                                used on a phone, mid-service, at speed. */}
                             <button
                               type="button"
-                              disabled={selectedOrder?.status === "sent"}
-                              onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, item.id)}
-                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
-                              aria-label={`Remove one ${item.name}`}
+                              disabled={isLockedOrder(selectedOrder)}
+                              onClick={() => selectedGuest && pos.removeOrderItem(selectedGuest.id, line.menuItemId)}
+                              className="grid size-11 place-items-center rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Remove one ${label}`}
                             >
-                              <Minus className="size-3" />
+                              <span className="grid size-6 place-items-center rounded-full border border-line">
+                                <Minus className="size-3" aria-hidden="true" />
+                              </span>
                             </button>
                             <span className="w-4 text-center text-xs font-black">{line.quantity}</span>
                             <button
                               type="button"
-                              disabled={selectedOrder?.status === "sent"}
-                              onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, item.id)}
-                              className="grid size-6 place-items-center rounded-full border border-line disabled:cursor-not-allowed disabled:opacity-40"
-                              aria-label={`Add one ${item.name}`}
+                              disabled={isLockedOrder(selectedOrder)}
+                              onClick={() => selectedGuest && pos.addOrderItem(selectedGuest.id, line.menuItemId)}
+                              className="grid size-11 place-items-center rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Add one ${label}`}
                             >
-                              <Plus className="size-3" />
+                              <span className="grid size-6 place-items-center rounded-full border border-line">
+                                <Plus className="size-3" aria-hidden="true" />
+                              </span>
                             </button>
                           </div>
                         </div>
@@ -679,7 +768,7 @@ export function PosShell() {
                       onChange={(notes) => pos.updateOrderNotes(selectedGuest.id, notes)}
                       placeholder="e.g. Fire mains after starters, sauce on side…"
                       rows={2}
-                      disabled={selectedOrder.status === "sent"}
+                      disabled={isLockedOrder(selectedOrder)}
                     />
                   </div>
                 )}
@@ -687,15 +776,24 @@ export function PosShell() {
               <div className="border-t border-line bg-surface-muted/60 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-bold">Subtotal</span>
-                  <span className="text-xl font-black">${orderTotal(selectedOrder).toFixed(2)}</span>
+                  <span className="text-xl font-black">{money(pos.insight.orderTotalCents)}</span>
                 </div>
                 <button
                   type="button"
-                  disabled={!selectedGuest || !selectedOrder?.lines.length || selectedOrder.status === "sent"}
+                  // `pos.pending` matters here: firing is irreversible, and
+                  // between the tap and the next revision this button was still
+                  // enabled. A second tap sends a second action with a fresh
+                  // id, so the server's dedupe-by-id cannot catch it.
+                  disabled={
+                    !selectedGuest ||
+                    !selectedOrder?.lines.length ||
+                    isLockedOrder(selectedOrder) ||
+                    pos.pending > 0
+                  }
                   onClick={() => selectedGuest && pos.sendOrder(selectedGuest.id)}
                   className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-3 text-sm font-black text-white hover:bg-accent-dark disabled:bg-line disabled:text-ink-muted"
                 >
-                  {selectedOrder?.status === "sent" ? <><Check className="size-4" /> Sent to kitchen</> : <>Send order <ArrowRight className="size-4" /></>}
+                  {isLockedOrder(selectedOrder) ? <><Check className="size-4" /> {orderStageLabel(selectedOrder)}</> : <>Send order <ArrowRight className="size-4" /></>}
                 </button>
               </div>
             </aside>
@@ -768,12 +866,12 @@ export function PosShell() {
                   </div>
                   <div className="rounded-xl border border-line p-4">
                     <Star className="size-5 text-warning" />
-                    <p className="mt-3 text-sm font-black">{menuItems.find((item) => item.id === dishRecommendations.find((entry) => entry.eligible)?.id)?.name}</p>
+                    <p className="mt-3 text-sm font-black">{pos.menuItems.find((item) => item.id === dishRecommendations.find((entry) => entry.eligible)?.id)?.name}</p>
                     <p className="mt-1 text-xs text-ink-muted">Top dish match</p>
                   </div>
                   <div className="rounded-xl border border-line p-4">
                     <CircleDollarSign className="size-5 text-accent" />
-                    <p className="mt-3 text-sm font-black">${orderTotal(selectedOrder).toFixed(2)}</p>
+                    <p className="mt-3 text-sm font-black">{money(pos.insight.orderTotalCents)}</p>
                     <p className="mt-1 text-xs text-ink-muted">Current subtotal</p>
                   </div>
                 </div>

@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Cargo's build directory. Tauri's codegen writes bundled assets as .js
+    // there, which ESLint would otherwise try to parse.
+    "target/**",
+    // Generated from the Rust types by ts-rs; edit crates/ember-core instead.
+    "lib/generated/**",
   ]),
 ]);
 

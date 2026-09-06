@@ -1,11 +1,10 @@
-import { PosShell } from "@/components/pos-shell";
-import { SiteHeader } from "@/components/site-header";
+import { AuthGate } from "@/components/auth-gate";
+import { PosSurface } from "@/components/pos-surface";
 
 export default function PosPage() {
   return (
-    <>
-      <SiteHeader active="pos" />
-      <PosShell />
-    </>
+    <AuthGate>
+      <PosSurface />
+    </AuthGate>
   );
 }

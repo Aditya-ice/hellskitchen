@@ -1,0 +1,573 @@
+//! Scoring and eligibility rules. Ported from `lib/decision-engine.ts`.
+//!
+//! The weights and the order in which reasons and warnings are pushed are
+//! deliberately identical to the TypeScript original — the tests in this module
+//! are the same fixtures the vitest suite used, so any drift shows up as a
+//! failure rather than as a quietly different ranking.
+//!
+//! Everything here is a pure function. Hard safety rules (allergens, dietary
+//! conflicts, unavailable stock) live in `recommend_dishes` and gate
+//! `eligible`; nothing downstream — including any model in `services/brain` —
+//! is permitted to reverse that decision.
+
+use std::collections::HashMap;
+
+use crate::domain::*;
+
+fn normalize(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+/// `Math.max(0, Math.min(100, Math.round(score)))` from the original.
+///
+/// The bounds are literals, so `clamp` cannot panic here.
+fn clamp_score(score: f64) -> f64 {
+    score.round().clamp(0.0, 100.0)
+}
+
+/// Why this party cannot sit at this table, or `None` when they can.
+///
+/// The order of the checks is the order a host would think in, so the reason
+/// they are told is the most useful one rather than whichever test happened to
+/// run first.
+pub fn seating_obstacle(guest: &GuestProfile, table: &Table) -> Option<Rejection> {
+    let may_be_seated = matches!(
+        guest.status,
+        GuestStatus::Waiting | GuestStatus::Seated | GuestStatus::Ordered
+    );
+    if !may_be_seated {
+        return Some(Rejection::GuestNotReadyToSeat);
+    }
+    if table.status != TableStatus::Available || table.seated_guest_id.is_some() {
+        return Some(Rejection::TableUnavailable);
+    }
+    if table.capacity < guest.party_size {
+        return Some(Rejection::TableTooSmall);
+    }
+
+    let needs_accessible = guest
+        .seating_preferences
+        .iter()
+        .any(|preference| preference == "accessible");
+    if needs_accessible && !table.accessible {
+        return Some(Rejection::TableNotAccessible);
+    }
+    None
+}
+
+pub fn can_seat_guest_at_table(guest: &GuestProfile, table: &Table) -> bool {
+    seating_obstacle(guest, table).is_none()
+}
+
+pub fn recommend_tables(guest: &GuestProfile, tables: &[Table]) -> Vec<Recommendation> {
+    let mut server_loads: HashMap<&str, f64> = HashMap::new();
+    for table in tables {
+        let entry = server_loads.entry(table.server_id.as_str()).or_insert(0.0);
+        *entry += if table.status == TableStatus::Occupied {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    let needs_accessible = guest
+        .seating_preferences
+        .iter()
+        .any(|preference| preference == "accessible");
+
+    let mut recommendations: Vec<Recommendation> = tables
+        .iter()
+        .map(|table| {
+            let mut reasons: Vec<String> = Vec::new();
+            let mut warnings: Vec<String> = Vec::new();
+
+            let is_available_soon = table.status == TableStatus::Available
+                || (table.status == TableStatus::Clearing
+                    && table.estimated_available_minutes <= 15.0);
+            let eligible = table.capacity >= guest.party_size
+                && is_available_soon
+                && (!needs_accessible || table.accessible);
+
+            if table.capacity < guest.party_size {
+                warnings.push("Too small for this party".into());
+            }
+            if !is_available_soon {
+                warnings.push("Not available within 15 minutes".into());
+            }
+            if needs_accessible && !table.accessible {
+                warnings.push("Does not meet accessibility need".into());
+            }
+
+            let load = server_loads
+                .get(table.server_id.as_str())
+                .copied()
+                .unwrap_or(0.0);
+            let spare_seats = table.capacity as i64 - guest.party_size as i64;
+
+            let mut score = 100.0;
+            score -= spare_seats.max(0) as f64 * 7.0;
+            score -= load * 8.0;
+            score -= table.estimated_available_minutes * 1.2;
+
+            if table.capacity == guest.party_size {
+                reasons.push("Exact fit for the party".into());
+            } else if table.capacity > guest.party_size {
+                reasons.push(format!(
+                    "{spare_seats} spare seat{}",
+                    if spare_seats == 1 { "" } else { "s" }
+                ));
+            }
+
+            if guest
+                .seating_preferences
+                .iter()
+                .any(|preference| preference == table.area.as_str())
+            {
+                score += 16.0;
+                reasons.push(format!("Matches {} preference", table.area.as_str()));
+            }
+            if needs_accessible && table.accessible {
+                score += 14.0;
+                reasons.push("Accessible route and seating".into());
+            }
+            if load == 0.0 {
+                score += 8.0;
+                reasons.push("Balances server workload".into());
+            }
+            if table.status == TableStatus::Available {
+                reasons.push("Ready now".into());
+            }
+            if table.status == TableStatus::Clearing {
+                reasons.push(format!(
+                    "Ready in about {} min",
+                    format_amount(table.estimated_available_minutes)
+                ));
+            }
+
+            Recommendation {
+                id: table.id.clone(),
+                score: if eligible { clamp_score(score) } else { 0.0 },
+                eligible,
+                reasons,
+                warnings,
+            }
+        })
+        .collect();
+
+    // Stable sort, matching JS: eligible first, then score descending.
+    recommendations.sort_by(|a, b| {
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    recommendations
+}
+
+fn dietary_conflict(item_tags: &[String], need: &str) -> bool {
+    let has = |tag: &str| item_tags.iter().any(|value| value == tag);
+    match normalize(need).as_str() {
+        "vegan" => !has("vegan"),
+        "vegetarian" => !has("vegetarian") && !has("vegan"),
+        "gluten-free" => !has("gluten-free"),
+        _ => false,
+    }
+}
+
+/// Why this guest may not be sold this dish, or `None` when they may be.
+///
+/// This is *the* safety rule, and it is deliberately the only copy of it.
+/// `recommend_dishes` calls it to set `eligible`, and the reducer calls it
+/// before a line reaches a check — so a dish cannot be blocked on screen and
+/// still be orderable through the API, which is exactly what happened while the
+/// rule lived only inside the scoring loop.
+///
+/// The order of the checks is the order that matters: an allergen is a
+/// different kind of "no" from a dietary preference, and both are a different
+/// kind of "no" from having run out.
+pub fn dish_obstacle(
+    guest: &GuestProfile,
+    item: &MenuItem,
+    ingredients: &[Ingredient],
+) -> Option<Rejection> {
+    let normalized_allergens: Vec<String> = item
+        .allergens
+        .iter()
+        .map(|value| normalize(value))
+        .collect();
+    if guest
+        .allergies
+        .iter()
+        .any(|allergy| normalized_allergens.contains(&normalize(allergy)))
+    {
+        return Some(Rejection::DishContainsAllergen);
+    }
+
+    if guest
+        .dietary_needs
+        .iter()
+        .any(|need| dietary_conflict(&item.tags, need))
+    {
+        return Some(Rejection::DishConflictsWithDiet);
+    }
+
+    if ingredients
+        .iter()
+        .filter(|ingredient| item.ingredient_ids.contains(&ingredient.id))
+        .any(|ingredient| ingredient.on_hand <= 0.0)
+    {
+        return Some(Rejection::DishUnavailable);
+    }
+
+    None
+}
+
+pub fn recommend_dishes(
+    guest: &GuestProfile,
+    menu_items: &[MenuItem],
+    ingredients: &[Ingredient],
+) -> Vec<Recommendation> {
+    let mut recommendations: Vec<Recommendation> = menu_items
+        .iter()
+        .map(|item| {
+            let mut reasons: Vec<String> = Vec::new();
+            let mut warnings: Vec<String> = Vec::new();
+
+            let normalized_allergens: Vec<String> = item
+                .allergens
+                .iter()
+                .map(|value| normalize(value))
+                .collect();
+            let allergy_matches: Vec<&String> = guest
+                .allergies
+                .iter()
+                .filter(|allergy| normalized_allergens.contains(&normalize(allergy)))
+                .collect();
+            let dietary_conflicts: Vec<&String> = guest
+                .dietary_needs
+                .iter()
+                .filter(|need| dietary_conflict(&item.tags, need))
+                .collect();
+
+            let item_ingredients: Vec<&Ingredient> = ingredients
+                .iter()
+                .filter(|ingredient| item.ingredient_ids.contains(&ingredient.id))
+                .collect();
+            let unavailable: Vec<&&Ingredient> = item_ingredients
+                .iter()
+                .filter(|ingredient| ingredient.on_hand <= 0.0)
+                .collect();
+            let low_stock: Vec<&&Ingredient> = item_ingredients
+                .iter()
+                .filter(|ingredient| {
+                    ingredient.on_hand > 0.0 && ingredient.on_hand / ingredient.par <= 0.25
+                })
+                .collect();
+
+            // Asked, not recomputed: one rule, so the engine and the reducer
+            // cannot drift into disagreeing about what is safe to sell.
+            let eligible = dish_obstacle(guest, item, ingredients).is_none();
+
+            for allergy in &allergy_matches {
+                warnings.push(format!("Contains guest allergen: {allergy}"));
+            }
+            for need in &dietary_conflicts {
+                warnings.push(format!("Does not meet {need}"));
+            }
+            for ingredient in &unavailable {
+                warnings.push(format!("{} is unavailable", ingredient.name));
+            }
+            for ingredient in &low_stock {
+                warnings.push(format!("{} is running low", ingredient.name));
+            }
+
+            let mut score = item.popularity * 0.42 + item.margin_score * 0.22;
+            score += (22.0 - item.prep_minutes).max(0.0) * 0.65;
+
+            let search_text = format!("{} {} {}", item.name, item.description, item.tags.join(" "))
+                .to_lowercase();
+
+            let matched_likes: Vec<&String> = guest
+                .likes
+                .iter()
+                .filter(|like| search_text.contains(&normalize(like)))
+                .collect();
+            let matched_dislikes: Vec<&String> = guest
+                .dislikes
+                .iter()
+                .filter(|dislike| search_text.contains(&normalize(dislike)))
+                .collect();
+
+            if !matched_likes.is_empty() {
+                score += 18.0;
+                reasons.push(format!(
+                    "Matches preference: {}",
+                    matched_likes
+                        .iter()
+                        .map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !matched_dislikes.is_empty() {
+                score -= 35.0;
+                warnings.push(format!(
+                    "Guest dislikes {}",
+                    matched_dislikes
+                        .iter()
+                        .map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !guest.dietary_needs.is_empty() && dietary_conflicts.is_empty() {
+                score += 10.0;
+                reasons.push(format!("Meets {}", guest.dietary_needs.join(" + ")));
+            }
+            if item.prep_minutes <= 12.0 {
+                reasons.push("Fast kitchen pacing".into());
+            }
+            if item.popularity >= 90.0 {
+                reasons.push("Guest favorite".into());
+            }
+            if item.margin_score >= 88.0 {
+                reasons.push("Strong value for the restaurant".into());
+            }
+            if !low_stock.is_empty() {
+                score -= 18.0;
+            }
+
+            reasons.truncate(3);
+
+            Recommendation {
+                id: item.id.clone(),
+                score: if eligible { clamp_score(score) } else { 0.0 },
+                eligible,
+                reasons,
+                warnings,
+            }
+        })
+        .collect();
+
+    recommendations.sort_by(|a, b| {
+        b.eligible.cmp(&a.eligible).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    recommendations
+}
+
+/// The check total, in minor units.
+///
+/// Reads the price recorded on each line rather than looking it up in the menu,
+/// so repricing a dish no longer rewrites checks that already contain it — the
+/// bug that made every historical total a function of today's menu. `menu_items`
+/// remains only as the fallback for lines written before prices were captured.
+pub fn order_total(order: Option<&Order>, menu_items: &[MenuItem]) -> i64 {
+    let Some(order) = order else { return 0 };
+    order
+        .lines
+        .iter()
+        .map(|line| {
+            let unit = line.unit_price_cents.unwrap_or_else(|| {
+                menu_items
+                    .iter()
+                    .find(|item| item.id == line.menu_item_id)
+                    .map(|item| item.price_cents)
+                    .unwrap_or(0)
+            });
+            unit.saturating_mul(i64::from(line.quantity))
+        })
+        .sum()
+}
+
+pub fn estimate_wait(guest: &GuestProfile, tables: &[Table]) -> f64 {
+    let recommendations = recommend_tables(guest, tables);
+    let Some(recommendation) = recommendations.iter().find(|item| item.eligible) else {
+        return 25.0;
+    };
+    match tables.iter().find(|table| table.id == recommendation.id) {
+        Some(table) if table.status == TableStatus::Available => 0.0,
+        Some(table) => table.estimated_available_minutes,
+        None => 15.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::seed;
+
+    fn guest(id: &str) -> GuestProfile {
+        seed::guests()
+            .into_iter()
+            .find(|guest| guest.id == id)
+            .expect("seeded guest")
+    }
+
+    fn find<'a>(items: &'a [Recommendation], id: &str) -> &'a Recommendation {
+        items
+            .iter()
+            .find(|item| item.id == id)
+            .expect("recommendation present")
+    }
+
+    // --- table recommendations (ported from lib/decision-engine.test.ts) ---
+
+    #[test]
+    fn ranks_the_exact_fit_accessible_window_table_first_for_maya() {
+        let recommendations = recommend_tables(&guest("guest-maya"), &seed::tables());
+        let top = &recommendations[0];
+
+        assert_eq!(top.id, "t2");
+        assert!(top.eligible);
+        assert_eq!(top.score, 100.0);
+        assert!(top
+            .reasons
+            .contains(&"Matches window preference".to_string()));
+    }
+
+    #[test]
+    fn enforces_capacity_and_accessibility_as_hard_constraints() {
+        let recommendations = recommend_tables(&guest("guest-priya"), &seed::tables());
+
+        // t5 is not accessible; t1 seats two and Priya is a party of five.
+        assert!(!find(&recommendations, "t5").eligible);
+        assert!(!find(&recommendations, "t1").eligible);
+    }
+
+    #[test]
+    fn returns_no_wait_when_the_top_table_is_already_available() {
+        assert_eq!(estimate_wait(&guest("guest-maya"), &seed::tables()), 0.0);
+    }
+
+    #[test]
+    fn only_allows_a_checked_in_guest_at_an_available_compatible_table() {
+        let tables = seed::tables();
+        let accessible = tables.iter().find(|table| table.id == "t2").unwrap();
+        let occupied = tables.iter().find(|table| table.id == "t3").unwrap();
+
+        assert!(can_seat_guest_at_table(&guest("guest-maya"), accessible));
+        // Jordan is still "expected" — not checked in yet.
+        assert!(!can_seat_guest_at_table(&guest("guest-jordan"), accessible));
+        assert!(!can_seat_guest_at_table(&guest("guest-maya"), occupied));
+    }
+
+    // --- dish recommendations ---
+
+    #[test]
+    fn blocks_explicit_allergens_and_unmet_dietary_requirements() {
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
+
+        let tartare = find(&recommendations, "carrot-tartare");
+        assert!(!tartare.eligible);
+        assert!(tartare
+            .warnings
+            .contains(&"Contains guest allergen: tree nuts".to_string()));
+
+        let farro = find(&recommendations, "mushroom-farro");
+        assert!(!farro.eligible);
+        assert!(farro
+            .warnings
+            .contains(&"Does not meet gluten-free".to_string()));
+    }
+
+    #[test]
+    fn keeps_only_vegan_compatible_dishes_eligible_for_a_vegan_guest() {
+        let recommendations = recommend_dishes(
+            &guest("guest-jordan"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
+
+        assert!(find(&recommendations, "cauliflower").eligible);
+        assert!(!find(&recommendations, "herb-chicken").eligible);
+    }
+
+    #[test]
+    fn ineligible_dishes_always_score_zero() {
+        let recommendations = recommend_dishes(
+            &guest("guest-maya"),
+            &seed::menu_items(),
+            &seed::ingredients(),
+        );
+
+        for recommendation in recommendations.iter().filter(|item| !item.eligible) {
+            assert_eq!(
+                recommendation.score, 0.0,
+                "{} scored above zero",
+                recommendation.id
+            );
+        }
+    }
+
+    // --- orders ---
+
+    fn line(menu_item_id: &str, quantity: u32, unit_price_cents: Option<i64>) -> OrderLine {
+        OrderLine {
+            menu_item_id: menu_item_id.into(),
+            quantity,
+            notes: String::new(),
+            unit_price_cents,
+            name_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn totals_come_from_the_price_recorded_on_each_line() {
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![
+            line("beet-salad", 2, Some(1700)),
+            line("chocolate-torte", 1, Some(1400)),
+        ];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 4800);
+    }
+
+    #[test]
+    fn repricing_a_dish_does_not_rewrite_a_check_that_already_holds_it() {
+        // The whole reason prices are captured on the line. Totals used to be
+        // recomputed from the live menu, so a price change silently restated
+        // every check the dish had ever appeared on, settled ones included.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, Some(1700))];
+
+        let mut repriced = seed::menu_items();
+        for item in repriced.iter_mut().filter(|item| item.id == "beet-salad") {
+            item.price_cents = 9900;
+        }
+
+        assert_eq!(order_total(Some(&order), &repriced), 3400);
+    }
+
+    #[test]
+    fn a_line_from_before_prices_were_recorded_falls_back_to_the_menu() {
+        // No price was captured for these, so the menu is the only information
+        // there is about them — which is exactly how they were totalled when
+        // they were written.
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("beet-salad", 2, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 3400);
+    }
+
+    #[test]
+    fn an_unknown_dish_on_an_old_line_totals_zero_rather_than_panicking() {
+        let mut order = seed::orders().remove(0);
+        order.lines = vec![line("withdrawn-dish", 3, None)];
+
+        assert_eq!(order_total(Some(&order), &seed::menu_items()), 0);
+    }
+
+    #[test]
+    fn an_absent_order_totals_zero() {
+        assert_eq!(order_total(None, &seed::menu_items()), 0);
+    }
+}

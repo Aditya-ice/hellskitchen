@@ -9,59 +9,164 @@ import {
   useRef,
   useState,
 } from "react";
-import { demoGuests, demoOrders, demoTables } from "@/data/demo";
-import { canSeatGuestAtTable } from "@/lib/decision-engine";
 import type {
   ActivityEvent,
   GuestProfile,
-  PosState,
+  Ingredient,
+  MenuItem,
+  Order,
+  Recommendation,
+  Restaurant,
+  StaffMember,
+  Table,
 } from "@/lib/domain";
+import type { Rejection } from "@/lib/generated/Rejection";
+import type { ActionInput, ActionRequest, Identity } from "@/lib/pos-client";
+import {
+  fetchMenu,
+  fetchForecast,
+  fetchRecommendations,
+  fetchSummary,
+  fetchIdentity,
+  logout,
+  newAction,
+  NotAuthenticatedError,
+  newWalkIn,
+  postAction,
+  subscribeToState,
+  type FloorSummary,
+  type Forecast,
+  type MenuPayload,
+  type Revision,
+} from "@/lib/pos-client";
 
-const STORAGE_KEY = "ember-pos-state-v2";
-const CHANNEL_KEY = "ember-pos-live-v2";
+/**
+ * The POS no longer holds state — `ember-server` does. This provider keeps a
+ * local mirror of the server's latest revision, posts actions, and applies
+ * whatever the server pushes back over SSE.
+ *
+ * The shape of this context is unchanged from the localStorage version, so the
+ * views on top of it did not have to be rewritten. What changed underneath:
+ * every open surface now shares one floor, and state survives a reload.
+ */
 
-export function createInitialPosState(): PosState {
-  return {
-    tables: demoTables.map((table) => ({ ...table })),
-    guests: demoGuests.map((guest) => ({
-      ...guest,
-      allergies: [...guest.allergies],
-      dietaryNeeds: [...guest.dietaryNeeds],
-      likes: [...guest.likes],
-      dislikes: [...guest.dislikes],
-      seatingPreferences: [...guest.seatingPreferences],
-    })),
-    orders: demoOrders.map((order) => ({
-      ...order,
-      lines: order.lines.map((line) => ({ ...line })),
-    })),
-    activity: [],
-  };
+/** Everything the server tells us about the currently selected guest. */
+export interface GuestInsight {
+  /** Which guest these scores belong to; null before the first response. */
+  guestId: string | null;
+  tables: Recommendation[];
+  dishes: Recommendation[];
+  estimateWait: number;
+  /** Subtotal in minor units. Formatted at the edge. */
+  orderTotalCents: number;
+  /** Whether the brain reranked this, or it is the engine's own ordering. */
+  rankedBy: "engine" | "model";
 }
 
-export type SharedAction =
-  | { id: string; at: string; type: "check-in"; guestId: string }
-  | { id: string; at: string; type: "add-walk-in"; guest: GuestProfile }
-  | { id: string; at: string; type: "update-guest-notes"; guestId: string; notes: string }
-  | { id: string; at: string; type: "seat-guest"; guestId: string; tableId: string }
-  | { id: string; at: string; type: "add-order-item"; guestId: string; menuItemId: string }
-  | { id: string; at: string; type: "remove-order-item"; guestId: string; menuItemId: string }
-  | { id: string; at: string; type: "update-order-notes"; guestId: string; notes: string }
-  | { id: string; at: string; type: "send-order"; guestId: string }
-  | { id: string; at: string; type: "reset" };
+const emptyInsight: GuestInsight = {
+  guestId: null,
+  tables: [],
+  dishes: [],
+  estimateWait: 0,
+  orderTotalCents: 0,
+  rankedBy: "engine",
+};
 
-export type SharedActionInput = SharedAction extends infer Action
-  ? Action extends SharedAction
-    ? Omit<Action, "id" | "at">
-    : never
-  : never;
+const emptySummary: FloorSummary = {
+  version: -1,
+  waitingGuests: 0,
+  openTables: 0,
+  averageWaitMinutes: 0,
+};
 
-interface SharedMessage {
-  action: SharedAction;
+/**
+ * What the UI renders before the menu loads, and if it never does.
+ *
+ * The name used to be "Ember & Ash" — the seeded demo restaurant — so a client
+ * that could not reach the server displayed a confident, wrong venue name and a
+ * "Dinner service" label it had invented. An empty name renders as nothing,
+ * which is the truth.
+ */
+const emptyMenu: MenuPayload = {
+  restaurant: {
+    name: "",
+    shortName: "",
+    venue: "",
+    serviceLabel: "",
+    covers: 0,
+    currency: "USD",
+    taxRateBps: 0,
+  },
+  menuItems: [],
+  staff: [],
+};
+
+/**
+ * Something the person at the terminal needs told.
+ *
+ * `refused` is the common one and is not a fault: the server allowed the
+ * request but a guard said no — the table was taken, the ticket is already with
+ * the kitchen. `failed` means the change did not reach the server at all, so
+ * the floor on screen may be behind.
+ */
+export interface PosNotice {
+  kind: "refused" | "failed";
+  message: string;
+  /** Present for a refusal, so a surface can key off the tag, not the prose. */
+  reason?: Rejection;
+  /** Distinguishes two identical messages in a row, so a toast re-announces. */
+  id: number;
 }
 
-interface PosContextValue extends PosState {
+interface PosContextValue {
+  // state mirrored from the server
+  tables: Table[];
+  guests: GuestProfile[];
+  orders: Order[];
+  activity: ActivityEvent[];
+
   hydrated: boolean;
+  /** False while the event stream is down. */
+  connected: boolean;
+  /** The last thing that needs saying, or null. Render this — do not swallow it. */
+  notice: PosNotice | null;
+  dismissNotice: () => void;
+  /**
+   * How many writes are in flight. Anything that fires an irreversible action
+   * disables itself while this is non-zero, because between the click and the
+   * next revision the button is still enabled and a second tap sends a second
+   * action with a different id — which server-side dedupe cannot catch.
+   */
+  pending: number;
+  /** True when the reference data failed to load, so the UI can say so. */
+  menuFailed: boolean;
+  retryMenu: () => void;
+
+  /** Whether this terminal is signed in. `null` until the first answer. */
+  authenticated: boolean | null;
+  /** True when a session that *was* working stopped working. */
+  sessionEnded: boolean;
+  /** Re-reads everything, after signing in. */
+  reload: () => void;
+  /** Ends the session and returns the terminal to the keypad. */
+  signOut: () => void;
+  /** Who is signed in, for attribution in the UI. */
+  identity: Identity | null;
+
+  // reference data, served by the same Rust seed the engine scores against
+  restaurant: Restaurant;
+  menuItems: MenuItem[];
+  staff: StaffMember[];
+  /** Live stock — part of the state, so it moves as tickets are fired. */
+  ingredients: Ingredient[];
+
+  /** Server-computed scores for the selected guest. */
+  insight: GuestInsight;
+  /** Server-computed floor numbers for the header. */
+  summary: FloorSummary;
+  /** Demand forecast from the optional brain; unavailable without it. */
+  forecast: Forecast;
+
   selectedGuestId: string | null;
   selectGuest: (id: string) => void;
   checkInGuest: (id: string) => void;
@@ -72,397 +177,406 @@ interface PosContextValue extends PosState {
   removeOrderItem: (guestId: string, menuItemId: string) => void;
   updateOrderNotes: (guestId: string, notes: string) => void;
   sendOrder: (guestId: string) => void;
-  resetDemo: () => void;
+  /** Bumped from the pass. Addressed by order id — the kitchen works from
+   *  tickets, not from who is sitting where. */
+  completeOrder: (orderId: string) => void;
+  /** Books a delivery in. Additive, so concurrent restocks add up. */
+  restockIngredient: (ingredientId: string, quantity: number) => void;
 }
 
 const PosContext = createContext<PosContextValue | null>(null);
 
-function activity(action: SharedAction, label: string, detail: string): ActivityEvent {
-  return {
-    id: `${action.id}-activity`,
-    at: action.at,
-    action: label,
-    detail,
-  };
-}
-
-export function reducePosState(current: PosState, action: SharedAction): PosState {
-  switch (action.type) {
-    case "check-in": {
-      const guest = current.guests.find((item) => item.id === action.guestId);
-      if (!guest || guest.status !== "expected") return current;
-      return {
-        ...current,
-        guests: current.guests.map((item) =>
-          item.id === action.guestId
-            ? {
-                ...item,
-                status: "waiting",
-                arrivalTime: new Date(action.at).toLocaleTimeString([], {
-                  hour: "numeric",
-                  minute: "2-digit",
-                }),
-              }
-            : item,
-        ),
-        activity: [
-          activity(action, "Guest checked in", `${guest.name} joined the arrivals queue`),
-          ...current.activity,
-        ],
-      };
-    }
-    case "add-walk-in":
-      if (current.guests.some((guest) => guest.id === action.guest.id)) return current;
-      return {
-        ...current,
-        guests: [...current.guests, action.guest],
-        activity: [
-          activity(
-            action,
-            "Walk-in added",
-            `${action.guest.name}, party of ${action.guest.partySize}`,
-          ),
-          ...current.activity,
-        ],
-      };
-    case "update-guest-notes":
-      return {
-        ...current,
-        guests: current.guests.map((guest) =>
-          guest.id === action.guestId ? { ...guest, notes: action.notes } : guest,
-        ),
-      };
-    case "seat-guest": {
-      const guest = current.guests.find((item) => item.id === action.guestId);
-      const currentTable = current.tables.find(
-        (table) => table.seatedGuestId === action.guestId,
-      );
-      const targetTable = current.tables.find((table) => table.id === action.tableId);
-      if (
-        !guest ||
-        !targetTable ||
-        currentTable?.id === targetTable.id ||
-        !canSeatGuestAtTable(guest, targetTable)
-      ) {
-        return current;
-      }
-
-      const existingOrder = current.orders.find(
-        (order) => order.guestId === action.guestId,
-      );
-      return {
-        ...current,
-        tables: current.tables.map((table) => {
-          if (table.id === currentTable?.id) {
-            return {
-              ...table,
-              status: "available",
-              seatedGuestId: null,
-              seatedAt: null,
-            };
-          }
-          if (table.id === targetTable.id) {
-            return {
-              ...table,
-              status: "occupied",
-              seatedGuestId: action.guestId,
-              seatedAt: action.at,
-            };
-          }
-          return table;
-        }),
-        guests: current.guests.map((item) =>
-          item.id === action.guestId ? { ...item, status: "seated" } : item,
-        ),
-        orders: existingOrder
-          ? current.orders.map((order) =>
-              order.guestId === action.guestId
-                ? { ...order, tableId: targetTable.id }
-                : order,
-            )
-          : [
-              ...current.orders,
-              {
-                id: `order-${action.id}`,
-                guestId: action.guestId,
-                tableId: targetTable.id,
-                status: "draft",
-                lines: [],
-                guestNotes: "",
-                createdAt: action.at,
-              },
-            ],
-        activity: [
-          activity(
-            action,
-            currentTable ? "Party moved" : "Party seated",
-            `${guest.name} assigned to ${targetTable.label}`,
-          ),
-          ...current.activity,
-        ],
-      };
-    }
-    case "add-order-item":
-      return {
-        ...current,
-        orders: current.orders.map((order) =>
-          order.guestId !== action.guestId || order.status === "sent"
-            ? order
-            : {
-                ...order,
-                lines: order.lines.some(
-                  (line) => line.menuItemId === action.menuItemId,
-                )
-                  ? order.lines.map((line) =>
-                      line.menuItemId === action.menuItemId
-                        ? { ...line, quantity: line.quantity + 1 }
-                        : line,
-                    )
-                  : [
-                      ...order.lines,
-                      { menuItemId: action.menuItemId, quantity: 1, notes: "" },
-                    ],
-              },
-        ),
-      };
-    case "remove-order-item":
-      return {
-        ...current,
-        orders: current.orders.map((order) =>
-          order.guestId !== action.guestId || order.status === "sent"
-            ? order
-            : {
-                ...order,
-                lines: order.lines
-                  .map((line) =>
-                    line.menuItemId === action.menuItemId
-                      ? { ...line, quantity: line.quantity - 1 }
-                      : line,
-                  )
-                  .filter((line) => line.quantity > 0),
-              },
-        ),
-      };
-    case "update-order-notes":
-      return {
-        ...current,
-        orders: current.orders.map((order) =>
-          order.guestId === action.guestId && order.status === "draft"
-            ? { ...order, guestNotes: action.notes }
-            : order,
-        ),
-      };
-    case "send-order": {
-      const guest = current.guests.find((item) => item.id === action.guestId);
-      const order = current.orders.find((item) => item.guestId === action.guestId);
-      if (!guest || !order || order.status !== "draft" || order.lines.length === 0) {
-        return current;
-      }
-      return {
-        ...current,
-        orders: current.orders.map((item) =>
-          item.id === order.id ? { ...item, status: "sent" } : item,
-        ),
-        guests: current.guests.map((item) =>
-          item.id === action.guestId ? { ...item, status: "ordered" } : item,
-        ),
-        activity: [
-          activity(action, "Order sent", `${guest.name} order sent to kitchen`),
-          ...current.activity,
-        ],
-      };
-    }
-    case "reset":
-      return createInitialPosState();
-  }
-}
-
-function parseStoredState(value: string | null): PosState | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as Partial<PosState>;
-    if (
-      !Array.isArray(parsed.tables) ||
-      !Array.isArray(parsed.guests) ||
-      !Array.isArray(parsed.orders) ||
-      !Array.isArray(parsed.activity)
-    ) {
-      return null;
-    }
-    return {
-      tables: parsed.tables,
-      guests: parsed.guests,
-      orders: parsed.orders,
-      activity: parsed.activity,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function persist(state: PosState) {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // The POS remains usable when storage is unavailable or full.
-  }
-}
-
-function newAction<T extends SharedActionInput>(
-  action: T,
-): T & { id: string; at: string } {
-  return {
-    ...action,
-    id: crypto.randomUUID(),
-    at: new Date().toISOString(),
-  };
-}
+const emptyRevision: Revision = {
+  version: -1,
+  state: { tables: [], guests: [], orders: [], activity: [], ingredients: [] },
+};
 
 export function PosProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<PosState>(createInitialPosState);
-  const [selectedGuestId, setSelectedGuestId] = useState<string | null>(
-    demoGuests[0]?.id ?? null,
-  );
+  const [revision, setRevision] = useState<Revision>(emptyRevision);
+  const [menu, setMenu] = useState<MenuPayload>(emptyMenu);
+  const [insight, setInsight] = useState<GuestInsight>(emptyInsight);
+  const [summary, setSummary] = useState<FloorSummary>(emptySummary);
+  const [forecast, setForecast] = useState<Forecast>({ available: false });
+  const [selectedGuestId, setSelectedGuestId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  const channel = useRef<BroadcastChannel | null>(null);
-  const seenActions = useRef(new Set<string>());
+  const [connected, setConnected] = useState(false);
+  const [notice, setNotice] = useState<PosNotice | null>(null);
+  const [pending, setPending] = useState(0);
+  const [menuFailed, setMenuFailed] = useState(false);
+  const [menuAttempt, setMenuAttempt] = useState(0);
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [sessionEnded, setSessionEnded] = useState(false);
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  /** Bumped to re-run every read after signing in. */
+  const [generation, setGeneration] = useState(0);
 
-  useEffect(() => {
-    let savedState: PosState | null = null;
-    try {
-      savedState = parseStoredState(window.localStorage.getItem(STORAGE_KEY));
-    } catch {
-      savedState = null;
-    }
+  // One place decides the terminal is signed out, so a 401 from any read has
+  // the same effect: back to the keypad, with the reason preserved.
+  const handleAuthFailure = useCallback(() => {
+    setAuthenticated((was) => {
+      if (was) setSessionEnded(true);
+      return false;
+    });
+    setIdentity(null);
+  }, []);
 
-    if ("BroadcastChannel" in window) {
-      channel.current = new BroadcastChannel(CHANNEL_KEY);
-      channel.current.onmessage = (message: MessageEvent<SharedMessage>) => {
-        const action = message.data?.action;
-        if (!action?.id || seenActions.current.has(action.id)) return;
-        seenActions.current.add(action.id);
-        setState((current) => {
-          const next = reducePosState(current, action);
-          persist(next);
-          return next;
-        });
-      };
-    }
+  // Monotonic, so two identical messages in a row are still two notices and the
+  // second one re-announces rather than looking like the first never cleared.
+  const noticeId = useRef(0);
+  const announce = useCallback(
+    (next: Omit<PosNotice, "id">) => {
+      noticeId.current += 1;
+      setNotice({ ...next, id: noticeId.current });
+    },
+    [],
+  );
+  const dismissNotice = useCallback(() => setNotice(null), []);
 
-    const hydrationTimer = window.setTimeout(() => {
-      if (savedState) setState(savedState);
+  // Guards against an in-flight POST response landing after a newer SSE frame.
+  const version = useRef(-1);
+
+  /**
+   * Adopts a revision, if it is one we should adopt.
+   *
+   * The two sources need different rules, and conflating them causes one bug
+   * or the other:
+   *
+   * `stream` is the live, ordered feed. A version going *backwards* on it means
+   * a different service — a redeployed or recreated database restarts at 0 —
+   * so it has to be adopted. Refusing it leaves the client silently ignoring
+   * every future revision while still showing itself as live.
+   *
+   * `response` is the reply to our own POST, and can land after a newer frame
+   * has already arrived on the stream. Adopting a lower version there rewinds
+   * the mirror and hides another terminal's change until the next broadcast,
+   * so it must only ever move forward.
+   */
+  const applyRevision = useCallback(
+    (next: Revision, source: "stream" | "response") => {
+      if (source === "response" && next.version <= version.current) return;
+      if (source === "stream" && next.version === version.current) return;
+
+      version.current = next.version;
+      setRevision(next);
       setHydrated(true);
-    }, 0);
+    },
+    [],
+  );
+
+  // Reference data changes rarely, but a single failed attempt used to leave
+  // the app with an empty menu and no staff for the rest of the service, so
+  // this backs off and keeps trying rather than giving up after one go.
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+
+    fetchMenu(controller.signal)
+      .then((payload) => {
+        setMenu(payload);
+        setMenuFailed(false);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        if (caught instanceof NotAuthenticatedError) {
+          handleAuthFailure();
+          return;
+        }
+        setMenuFailed(true);
+        announce({
+          kind: "failed",
+          message:
+            caught instanceof Error
+              ? caught.message
+              : "Could not load the menu.",
+        });
+        // 2s, 4s, 8s... capped at 30s.
+        const delay = Math.min(30_000, 2_000 * 2 ** Math.min(menuAttempt, 4));
+        timer = window.setTimeout(() => setMenuAttempt((n) => n + 1), delay);
+      });
 
     return () => {
-      window.clearTimeout(hydrationTimer);
-      channel.current?.close();
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
     };
+  }, [menuAttempt, generation, announce, handleAuthFailure]);
+
+  const retryMenu = useCallback(() => setMenuAttempt((n) => n + 1), []);
+
+  const reload = useCallback(() => {
+    setSessionEnded(false);
+    setAuthenticated(true);
+    setGeneration((n) => n + 1);
   }, []);
 
-  const dispatchShared = useCallback((action: SharedAction) => {
-    seenActions.current.add(action.id);
-    setState((current) => {
-      const next = reducePosState(current, action);
-      persist(next);
-      return next;
+  const signOut = useCallback(() => {
+    void logout().finally(() => {
+      setAuthenticated(false);
+      setSessionEnded(false);
+      setIdentity(null);
     });
-    channel.current?.postMessage({ action } satisfies SharedMessage);
   }, []);
+
+  // Who is at this terminal. Also the first thing that tells us whether the
+  // session is live, before any of the floor reads run.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchIdentity(controller.signal)
+      .then((state) => {
+        setAuthenticated(state.authenticated);
+        setIdentity(state.identity ?? null);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        if (caught instanceof NotAuthenticatedError) handleAuthFailure();
+      });
+    return () => controller.abort();
+  }, [generation, handleAuthFailure]);
+
+  // The stream replays the current revision on connect, so this both hydrates
+  // and keeps us live. No separate initial fetch is needed.
+  useEffect(() => {
+    return subscribeToState({
+      onRevision: (next) => applyRevision(next, "stream"),
+      onConnectedChange: setConnected,
+    });
+  }, [applyRevision, generation]);
+
+  // A revoked session looks exactly like a flaky network from here:
+  // `EventSource` cannot read the 401, so it just reconnects forever while the
+  // header says "Reconnecting…" over a floor that will never move again. The
+  // only way to tell the two apart is to ask.
+  useEffect(() => {
+    if (connected) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      fetchIdentity(controller.signal)
+        .then((state) => {
+          if (!state.authenticated) handleAuthFailure();
+        })
+        .catch((caught: unknown) => {
+          if (caught instanceof NotAuthenticatedError) handleAuthFailure();
+        });
+    }, 3_000);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [connected, handleAuthFailure]);
+
+  const state = revision.state;
 
   const effectiveSelectedGuestId = state.guests.some(
     (guest) => guest.id === selectedGuestId,
   )
     ? selectedGuestId
-    : state.guests[0]?.id ?? null;
+    : (state.guests[0]?.id ?? null);
+
+  // Rescore whenever the selection changes or the floor moves. Over loopback
+  // this is sub-millisecond, so it is cheaper than mirroring the engine here.
+  useEffect(() => {
+    if (!effectiveSelectedGuestId || revision.version < 0) return;
+
+    const controller = new AbortController();
+    fetchRecommendations(effectiveSelectedGuestId, controller.signal)
+      .then((payload) =>
+        setInsight({
+          guestId: payload.guestId,
+          tables: payload.tables,
+          dishes: payload.dishes,
+          estimateWait: payload.estimateWait,
+          orderTotalCents: payload.orderTotalCents,
+          rankedBy: payload.rankedBy ?? "engine",
+        }),
+      )
+      .catch(() => {
+        // A failed rescore leaves the previous ranking on screen rather than
+        // blanking it; the next revision retries.
+      });
+    return () => controller.abort();
+  }, [effectiveSelectedGuestId, revision.version]);
+
+  // Floor numbers follow the floor, not the selection.
+  useEffect(() => {
+    if (revision.version < 0) return;
+    const controller = new AbortController();
+    fetchSummary(controller.signal)
+      .then(setSummary)
+      .catch(() => {
+        // Header numbers are not worth surfacing an error over; the next
+        // revision retries.
+      });
+    return () => controller.abort();
+  }, [revision.version]);
+
+  // Stock forecasts move over minutes, not seconds, so this is on a timer
+  // rather than on every revision — the brain is optional and should not be
+  // asked a question per keystroke.
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = () =>
+      fetchForecast(controller.signal)
+        .then(setForecast)
+        .catch(() => {
+          // An unavailable forecast is the normal case without a brain.
+        });
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // Scores are only shown against the guest they were computed for. While a
+  // newly selected guest is being scored the panel is empty rather than
+  // showing the previous guest's — those rankings encode someone else's
+  // allergies, and a stale one on screen is worse than none.
+  const activeInsight =
+    insight.guestId && insight.guestId === effectiveSelectedGuestId
+      ? insight
+      : emptyInsight;
+
+  const dispatch = useCallback(
+    (action: ActionInput & ActionRequest) => {
+      setPending((n) => n + 1);
+      postAction(action)
+        .then((outcome) => {
+          applyRevision(outcome, "response");
+          // The server answers 200 for a refusal — it is a normal outcome of a
+          // busy floor, not a transport failure. Reading only the revision, as
+          // this used to, meant a refused seating looked exactly like a click
+          // that did nothing: no movement, no explanation, no way to tell the
+          // difference from a dropped tap.
+          if (outcome.outcome === "rejected") {
+            announce({
+              kind: "refused",
+              reason: outcome.reason,
+              message:
+                outcome.reasonMessage ?? "That change was not allowed.",
+            });
+          }
+        })
+        .catch((caught: unknown) => {
+          if (caught instanceof NotAuthenticatedError) {
+            handleAuthFailure();
+            return;
+          }
+          announce({
+            kind: "failed",
+            message:
+              caught instanceof Error
+                ? caught.message
+                : "That change could not be saved.",
+          });
+        })
+        .finally(() => setPending((n) => Math.max(0, n - 1)));
+    },
+    [applyRevision, announce, handleAuthFailure],
+  );
 
   const selectGuest = useCallback((id: string) => setSelectedGuestId(id), []);
 
   const checkInGuest = useCallback(
     (guestId: string) => {
       setSelectedGuestId(guestId);
-      dispatchShared(newAction({ type: "check-in", guestId }));
+      dispatch(newAction({ type: "check-in", guestId }));
     },
-    [dispatchShared],
+    [dispatch],
   );
 
   const addWalkIn = useCallback(
     (name: string, partySize: number) => {
-      const actionId = crypto.randomUUID();
-      const at = new Date().toISOString();
-      const guest: GuestProfile = {
-        id: `guest-${actionId}`,
-        name,
-        partySize,
-        reservationTime: null,
-        arrivalTime: new Date(at).toLocaleTimeString([], {
-          hour: "numeric",
-          minute: "2-digit",
-        }),
-        status: "waiting",
-        allergies: [],
-        dietaryNeeds: [],
-        likes: [],
-        dislikes: [],
-        seatingPreferences: [],
-        visitCount: 0,
-        lastVisit: null,
-        notes: "Walk-in guest",
-      };
+      const guest = newWalkIn(name, partySize);
       setSelectedGuestId(guest.id);
-      dispatchShared({ id: actionId, at, type: "add-walk-in", guest });
+      dispatch(newAction({ type: "add-walk-in", guest }));
       return guest.id;
     },
-    [dispatchShared],
+    [dispatch],
   );
 
   const updateGuestNotes = useCallback(
     (guestId: string, notes: string) =>
-      dispatchShared(newAction({ type: "update-guest-notes", guestId, notes })),
-    [dispatchShared],
+      dispatch(
+        newAction({ type: "update-guest-notes", guestId, notes }),
+      ),
+    [dispatch],
   );
 
   const seatGuest = useCallback(
     (guestId: string, tableId: string) =>
-      dispatchShared(newAction({ type: "seat-guest", guestId, tableId })),
-    [dispatchShared],
+      dispatch(
+        newAction({ type: "seat-guest", guestId, tableId }),
+      ),
+    [dispatch],
   );
 
   const addOrderItem = useCallback(
     (guestId: string, menuItemId: string) =>
-      dispatchShared(newAction({ type: "add-order-item", guestId, menuItemId })),
-    [dispatchShared],
+      dispatch(
+        newAction({ type: "add-order-item", guestId, menuItemId }),
+      ),
+    [dispatch],
   );
 
   const removeOrderItem = useCallback(
     (guestId: string, menuItemId: string) =>
-      dispatchShared(
+      dispatch(
         newAction({ type: "remove-order-item", guestId, menuItemId }),
       ),
-    [dispatchShared],
+    [dispatch],
   );
 
   const updateOrderNotes = useCallback(
     (guestId: string, notes: string) =>
-      dispatchShared(newAction({ type: "update-order-notes", guestId, notes })),
-    [dispatchShared],
+      dispatch(
+        newAction({ type: "update-order-notes", guestId, notes }),
+      ),
+    [dispatch],
   );
 
   const sendOrder = useCallback(
     (guestId: string) =>
-      dispatchShared(newAction({ type: "send-order", guestId })),
-    [dispatchShared],
+      dispatch(newAction({ type: "send-order", guestId })),
+    [dispatch],
   );
 
-  const resetDemo = useCallback(() => {
-    setSelectedGuestId(demoGuests[0]?.id ?? null);
-    dispatchShared(newAction({ type: "reset" }));
-  }, [dispatchShared]);
+  const completeOrder = useCallback(
+    (orderId: string) => dispatch(newAction({ type: "complete-order", orderId })),
+    [dispatch],
+  );
+
+  const restockIngredient = useCallback(
+    (ingredientId: string, quantity: number) =>
+      dispatch(newAction({ type: "restock-ingredient", ingredientId, quantity })),
+    [dispatch],
+  );
 
   const value = useMemo<PosContextValue>(
     () => ({
-      ...state,
+      tables: state.tables,
+      guests: state.guests,
+      orders: state.orders,
+      activity: state.activity,
       hydrated,
+      connected,
+      notice,
+      dismissNotice,
+      pending,
+      menuFailed,
+      retryMenu,
+      authenticated,
+      sessionEnded,
+      reload,
+      signOut,
+      identity,
+      restaurant: menu.restaurant,
+      menuItems: menu.menuItems,
+      staff: menu.staff,
+      ingredients: state.ingredients,
+      insight: activeInsight,
+      summary,
+      forecast,
       selectedGuestId: effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,
@@ -473,11 +587,27 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       removeOrderItem,
       updateOrderNotes,
       sendOrder,
-      resetDemo,
+      completeOrder,
+      restockIngredient,
     }),
     [
       state,
       hydrated,
+      connected,
+      notice,
+      dismissNotice,
+      pending,
+      menuFailed,
+      retryMenu,
+      authenticated,
+      sessionEnded,
+      reload,
+      signOut,
+      identity,
+      menu,
+      activeInsight,
+      summary,
+      forecast,
       effectiveSelectedGuestId,
       selectGuest,
       checkInGuest,
@@ -488,7 +618,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       removeOrderItem,
       updateOrderNotes,
       sendOrder,
-      resetDemo,
+      completeOrder,
+      restockIngredient,
     ],
   );
 

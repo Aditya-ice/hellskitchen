@@ -1,0 +1,6 @@
+# Pinned so CI, the desktop bundle and every developer build the same compiler.
+# Bump deliberately; `cargo test` regenerates lib/generated/, and a toolchain
+# change that alters ts-rs output would otherwise land silently.
+[toolchain]
+channel = "1.89.0"
+components = ["clippy", "rustfmt"]

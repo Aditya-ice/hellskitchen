@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Waves } from "lucide-react";
 import type { RealtimeConnection } from "@elevenlabs/client";
-import { ensureDemoSession } from "@/lib/demo-session-client";
+import { apiUrl } from "@/lib/pos-client";
 
 interface VoiceInputProps {
   label: string;
@@ -39,8 +39,10 @@ export function VoiceInput({
     baseText.current = value.trim();
 
     try {
-      await ensureDemoSession();
-      const response = await fetch("/api/elevenlabs/token", { cache: "no-store" });
+      const response = await fetch(apiUrl("/api/elevenlabs/token"), {
+        cache: "no-store",
+        credentials: "include",
+      });
       const body = (await response.json()) as { token?: string; error?: string };
       if (!response.ok || !body.token) throw new Error(body.error ?? "Voice unavailable");
 
@@ -127,7 +129,7 @@ export function VoiceInput({
         placeholder={placeholder}
         rows={rows}
         disabled={disabled}
-        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10"
+        className="w-full resize-none rounded-xl border border-line bg-white p-3 text-sm leading-6 outline-none placeholder:text-ink-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/10 disabled:cursor-not-allowed disabled:border-line/60 disabled:bg-surface-muted disabled:text-ink-muted"
       />
       <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
         <Waves className="size-3" />

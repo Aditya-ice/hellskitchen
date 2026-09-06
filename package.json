@@ -4,23 +4,31 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
+    "dev:server": "cargo run -q -p ember-server",
+    "brain": "uv run --project services/brain uvicorn brain.app:app --host 127.0.0.1 --port 4100",
+    "desktop": "cargo run -q -p ember-desktop",
+    "build": "EMBER_EXPORT=1 next build",
+    "build:server": "cargo build --release -p ember-server",
+    "desktop:build": "npm run build && tauri build",
+    "start": "npm run build && npm run build:server && EMBER_STATIC_DIR=./out ./target/release/ember-server",
+    "lint": "eslint --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:rust": "cargo test",
+    "test:all": "npm run test && npm run test:rust",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@elevenlabs/client": "^1.17.0",
-    "@elevenlabs/elevenlabs-js": "^2.62.0",
-    "@tavily/core": "^0.7.7",
     "lucide-react": "^1.31.0",
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
