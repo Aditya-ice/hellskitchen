@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Waves } from "lucide-react";
 import type { RealtimeConnection } from "@elevenlabs/client";
-import { apiUrl, ensureDemoSession } from "@/lib/pos-client";
+import { apiUrl } from "@/lib/pos-client";
 
 interface VoiceInputProps {
   label: string;
@@ -39,7 +39,6 @@ export function VoiceInput({
     baseText.current = value.trim();
 
     try {
-      await ensureDemoSession();
       const response = await fetch(apiUrl("/api/elevenlabs/token"), {
         cache: "no-store",
         credentials: "include",

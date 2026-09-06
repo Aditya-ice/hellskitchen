@@ -12,9 +12,10 @@ and the reranker sit on top of.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -24,7 +25,7 @@ def parse_time(value: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class History:
         """
         if self.first_at is None:
             return timedelta(0)
-        end = now or datetime.now(timezone.utc)
+        end = now or datetime.now(UTC)
         return max(end - self.first_at, timedelta(0))
 
     def dishes_ordered(self) -> dict[str, int]:
@@ -88,23 +89,56 @@ class History:
         return {guest: dict(items) for guest, items in by_guest.items()}
 
 
-def replay(entries: Iterable[dict[str, Any]]) -> History:
-    """Folds the log into a History.
+#: How far back a single service can reasonably reach.
+#:
+#: The log is append-only and persists across nights, so without a bound the
+#: "current service" silently became the entire history of the database: by day
+#: three a burn rate was divided by ~48 hours instead of ~2 and read about 25x
+#: too low, which made every stockout land outside the horizon while the
+#: confidence ladder still called the answer usable.
+DEFAULT_SERVICE_WINDOW = timedelta(hours=12)
+
+
+def replay(
+    entries: Iterable[dict[str, Any]],
+    now: datetime | None = None,
+    window: timedelta = DEFAULT_SERVICE_WINDOW,
+) -> History:
+    """Folds the log into a History covering the current service.
 
     Draft order contents are tracked per guest and snapshotted when the ticket
     is fired. `reset` clears everything, because a reset service shares nothing
     with the one before it — carrying totals across would make the first
     forecast after a reset wrong in a way nobody would spot.
+
+    Events older than `window` are skipped for the same reason: last Tuesday's
+    tickets are not evidence about tonight's carrots.
     """
     history = History()
     drafts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    horizon = (now - window) if now is not None else None
 
     for entry in entries:
         action = entry.get("action", entry)
         at = parse_time(action.get("at"))
         kind = action.get("type")
 
-        if at is not None:
+        # Outside the window, only two kinds of event still matter.
+        #
+        # A reset, because it is the strongest possible statement that what came
+        # before is over. And the draft edits that a ticket fired *inside* the
+        # window is built from: dropping those left `send-order` with no lines,
+        # so a ticket straddling the horizon was discarded entirely and the burn
+        # rate came out low — in the direction that makes a stockout look
+        # further away than it is.
+        stale = horizon is not None and at is not None and at < horizon
+        if stale and kind not in ("reset", "add-order-item", "remove-order-item"):
+            continue
+
+        # The span is how long *this service* covers, so a draft edit carried in
+        # from before the window must not widen it — that would reintroduce the
+        # deflated burn rate this window exists to prevent.
+        if at is not None and not stale:
             history.first_at = at if history.first_at is None else min(history.first_at, at)
             history.last_at = at if history.last_at is None else max(history.last_at, at)
 

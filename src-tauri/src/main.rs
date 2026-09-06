@@ -53,10 +53,17 @@ fn main() {
                 );
             }
 
+            // Lenient rather than strict: `from_env` refuses to start without
+            // EMBER_DB, which is right for the standalone server and wrong
+            // here, because the app always supplies its own path below. It has
+            // to be `from_env_lenient` and not `default`, though — defaulting
+            // dropped the ElevenLabs and Tavily keys along with the database,
+            // silently disabling voice input and dish context in the packaged
+            // app for anyone who had set them.
             let server = AppState::new(Config {
                 database: Some(database_path(app.handle())),
                 static_dir,
-                ..Config::from_env()
+                ..Config::from_env_lenient()
             })?;
 
             let desktop = Desktop {

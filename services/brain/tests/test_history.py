@@ -5,11 +5,11 @@ that the reconstruction is exact — a forecaster fed the wrong lines is worse
 than no forecaster.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from brain.history import History, replay
+from brain.history import DEFAULT_SERVICE_WINDOW, History, replay
 
-T0 = datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 26, 18, 0, tzinfo=UTC)
 
 
 def entry(kind: str, minutes: int = 0, **fields):
@@ -78,9 +78,7 @@ class TestReplayingTickets:
         assert dict(history.fires[1].lines) == {"ember-steak": 1}
 
     def test_a_second_ticket_does_not_inherit_the_first(self):
-        history = replay(
-            [add("beet-salad", 1), fire(2), add("ember-steak", 3), fire(4)]
-        )
+        history = replay([add("beet-salad", 1), fire(2), add("ember-steak", 3), fire(4)])
         assert dict(history.fires[0].lines) == {"beet-salad": 1}
         assert dict(history.fires[1].lines) == {"ember-steak": 1}
 
@@ -121,7 +119,11 @@ class TestOtherEvents:
 
     def test_ignores_events_it_has_no_use_for(self):
         history = replay(
-            [entry("update-guest-notes", 1, guestId="guest-maya", notes="hi"), add("beet-salad", 2), fire(3)]
+            [
+                entry("update-guest-notes", 1, guestId="guest-maya", notes="hi"),
+                add("beet-salad", 2),
+                fire(3),
+            ]
         )
         assert len(history.fires) == 1
 
@@ -160,3 +162,63 @@ class TestAggregates:
     def test_an_empty_log_has_no_span(self):
         assert replay([]).span(now=T0) == timedelta(0)
         assert History().span(now=T0) == timedelta(0)
+
+
+class TestServiceWindow:
+    """The log persists across nights; a service does not."""
+
+    # `entry` builds `at` from a minute offset, so a large negative one puts an
+    # event well before the window opens. The window is 12h; `now` is T0 + 2h,
+    # so the horizon sits at T0 - 10h.
+    STALE_MINUTES = -700
+
+    def test_events_older_than_the_window_are_ignored(self):
+        now = T0 + timedelta(hours=2)
+        history = replay(
+            [
+                add("beet-salad", self.STALE_MINUTES),
+                fire(self.STALE_MINUTES + 1),
+                add("beet-salad", 1),
+                fire(2),
+            ],
+            now=now,
+        )
+
+        # Without a bound, `first_at` was the earliest action ever recorded, so
+        # on day three a burn rate was divided by ~48 hours instead of ~2 and
+        # read about 25x too low -- while still being labelled usable.
+        assert len(history.fires) == 1
+        assert history.span(now=now) < DEFAULT_SERVICE_WINDOW
+
+    def test_a_reset_still_applies_from_outside_the_window(self):
+        now = T0 + timedelta(hours=2)
+
+        # A reset is the strongest statement that what came before is over, so
+        # it is honoured even when it falls outside the window.
+        history = replay(
+            [add("beet-salad", 1), entry("reset", self.STALE_MINUTES), fire(2)],
+            now=now,
+        )
+        assert history.fires == []
+
+    def test_no_now_means_no_window(self):
+        # Callers that do not supply a clock keep the old behaviour rather than
+        # having events silently dropped against an implicit "now".
+        history = replay([add("beet-salad", self.STALE_MINUTES), fire(self.STALE_MINUTES + 1)])
+        assert len(history.fires) == 1
+
+    def test_a_ticket_straddling_the_horizon_keeps_its_lines(self):
+        # Added just before the window opens, fired just inside it. Dropping the
+        # adds left `send-order` with nothing on it, so the ticket vanished and
+        # the burn rate came out low -- making a stockout look further away
+        # than it is, which is the wrong direction to be wrong in.
+        now = T0 + timedelta(hours=2)
+        history = replay(
+            [add("beet-salad", self.STALE_MINUTES), add("beet-salad", 1), fire(2)],
+            now=now,
+        )
+
+        assert len(history.fires) == 1
+        assert history.fires[0].lines == (("beet-salad", 2),)
+        # ...and the stale add still must not stretch the service span.
+        assert history.span(now=now) < DEFAULT_SERVICE_WINDOW

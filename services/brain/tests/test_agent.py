@@ -6,9 +6,7 @@ and make no requests.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 from brain.agent import SYSTEM_PROMPT, FloorAgent
 from tests.test_floor import PAYLOAD, floor
@@ -54,7 +52,7 @@ class TestTools:
         assert "OUT OF STOCK" in await agent().read_stock()
 
     async def test_read_tickets_reports_age(self):
-        text = await agent().read_tickets(datetime(2026, 8, 26, 18, 34, tzinfo=timezone.utc))
+        text = await agent().read_tickets(datetime(2026, 8, 26, 18, 34, tzinfo=UTC))
         assert "24 min old" in text
 
     async def test_read_ranking_passes_blocks_through(self):

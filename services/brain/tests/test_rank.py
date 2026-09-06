@@ -14,8 +14,7 @@ from brain.rank import (
     guest_traits,
     rerank,
 )
-
-from tests.test_history import add, entry, fire
+from tests.test_history import add, fire
 
 MAYA = {
     "id": "guest-maya",
@@ -207,9 +206,7 @@ class TestLearning:
 
     def test_relative_order_of_untried_dishes_is_untouched(self):
         model = build_model(service([("popular", 4)] * 4), GUESTS)
-        ranked = rerank(
-            dishes(("a", 93, True), ("b", 73, True), ("c", 71, True)), model, MAYA
-        )
+        ranked = rerank(dishes(("a", 93, True), ("b", 73, True), ("c", 71, True)), model, MAYA)
         assert [dish["score"] for dish in ranked] == [93, 73, 71]
 
     def test_an_unordered_dish_scores_zero_from_the_model(self):

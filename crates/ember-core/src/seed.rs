@@ -14,6 +14,12 @@ pub struct Restaurant {
     pub venue: String,
     pub service_label: String,
     pub covers: u32,
+    /// ISO 4217. Drives formatting at the edge, so the UI never hard-codes "$".
+    pub currency: String,
+    /// Sales tax in basis points — 8875 is New York City's 8.875%.
+    ///
+    /// Basis points rather than a float for the same reason prices are integers.
+    pub tax_rate_bps: u32,
 }
 
 pub const FALLBACK_DISH_CONTEXT: &str = "Seasonal preparation details are unavailable. Confirm ingredients and substitutions with the kitchen before describing them to a guest.";
@@ -25,10 +31,19 @@ pub fn restaurant() -> Restaurant {
         venue: "Fordham University, Lincoln Center, New York".into(),
         service_label: "Dinner service".into(),
         covers: 86,
+        currency: "USD".into(),
+        tax_rate_bps: 8875,
     }
 }
 
-fn ingredient(id: &str, name: &str, aliases: &[&str], on_hand: f64, par: f64, unit: &str) -> Ingredient {
+fn ingredient(
+    id: &str,
+    name: &str,
+    aliases: &[&str],
+    on_hand: f64,
+    par: f64,
+    unit: &str,
+) -> Ingredient {
     Ingredient {
         id: id.into(),
         name: name.into(),
@@ -43,15 +58,71 @@ pub fn ingredients() -> Vec<Ingredient> {
     vec![
         ingredient("carrot", "Carrots", &["carrot", "carrots"], 3.0, 18.0, "lb"),
         ingredient("beet", "Golden beets", &["beet", "beets"], 16.0, 12.0, "lb"),
-        ingredient("parsnip", "Parsnips", &["parsnip", "parsnips"], 14.0, 10.0, "lb"),
-        ingredient("salmon", "Salmon", &["salmon", "fish"], 24.0, 30.0, "portions"),
-        ingredient("chicken", "Chicken", &["chicken", "poultry"], 38.0, 36.0, "portions"),
+        ingredient(
+            "parsnip",
+            "Parsnips",
+            &["parsnip", "parsnips"],
+            14.0,
+            10.0,
+            "lb",
+        ),
+        ingredient(
+            "salmon",
+            "Salmon",
+            &["salmon", "fish"],
+            24.0,
+            30.0,
+            "portions",
+        ),
+        ingredient(
+            "chicken",
+            "Chicken",
+            &["chicken", "poultry"],
+            38.0,
+            36.0,
+            "portions",
+        ),
         ingredient("farro", "Farro", &["farro", "grain"], 12.0, 8.0, "lb"),
-        ingredient("hazelnut", "Hazelnuts", &["hazelnut", "nuts"], 5.0, 6.0, "lb"),
-        ingredient("mushroom", "Mushrooms", &["mushroom", "mushrooms"], 15.0, 12.0, "lb"),
-        ingredient("cauliflower", "Cauliflower", &["cauliflower"], 11.0, 9.0, "heads"),
-        ingredient("beef", "Dry-aged beef", &["beef", "steak"], 8.0, 18.0, "portions"),
-        ingredient("chocolate", "Dark chocolate", &["chocolate"], 10.0, 8.0, "lb"),
+        ingredient(
+            "hazelnut",
+            "Hazelnuts",
+            &["hazelnut", "nuts"],
+            5.0,
+            6.0,
+            "lb",
+        ),
+        ingredient(
+            "mushroom",
+            "Mushrooms",
+            &["mushroom", "mushrooms"],
+            15.0,
+            12.0,
+            "lb",
+        ),
+        ingredient(
+            "cauliflower",
+            "Cauliflower",
+            &["cauliflower"],
+            11.0,
+            9.0,
+            "heads",
+        ),
+        ingredient(
+            "beef",
+            "Dry-aged beef",
+            &["beef", "steak"],
+            8.0,
+            18.0,
+            "portions",
+        ),
+        ingredient(
+            "chocolate",
+            "Dark chocolate",
+            &["chocolate"],
+            10.0,
+            8.0,
+            "lb",
+        ),
     ]
 }
 
@@ -64,7 +135,7 @@ fn menu_item(
     ingredient_ids: &[&str],
     tags: &[&str],
     allergens: &[&str],
-    price: f64,
+    price_cents: i64,
     prep_minutes: f64,
     popularity: f64,
     margin_score: f64,
@@ -77,7 +148,7 @@ fn menu_item(
         ingredient_ids: ingredient_ids.iter().map(|value| (*value).into()).collect(),
         tags: tags.iter().map(|value| (*value).into()).collect(),
         allergens: allergens.iter().map(|value| (*value).into()).collect(),
-        price,
+        price_cents,
         prep_minutes,
         popularity,
         margin_score,
@@ -94,7 +165,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["carrot", "hazelnut"],
             &["vegetarian"],
             &["tree nuts", "gluten"],
-            18.0,
+            1800,
             8.0,
             91.0,
             86.0,
@@ -107,7 +178,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["beet"],
             &["vegan", "vegetarian", "gluten-free"],
             &[],
-            17.0,
+            1700,
             6.0,
             84.0,
             90.0,
@@ -120,7 +191,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["salmon", "carrot"],
             &["gluten-free", "pescatarian"],
             &["fish"],
-            34.0,
+            3400,
             16.0,
             94.0,
             72.0,
@@ -133,7 +204,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["mushroom", "farro"],
             &["vegetarian"],
             &["gluten", "dairy"],
-            29.0,
+            2900,
             13.0,
             82.0,
             88.0,
@@ -146,7 +217,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["chicken", "parsnip"],
             &["gluten-free"],
             &[],
-            32.0,
+            3200,
             18.0,
             89.0,
             76.0,
@@ -159,7 +230,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["beef"],
             &["gluten-free"],
             &[],
-            48.0,
+            4800,
             22.0,
             97.0,
             68.0,
@@ -172,7 +243,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["cauliflower"],
             &["vegan", "vegetarian", "gluten-free"],
             &["sesame"],
-            27.0,
+            2700,
             12.0,
             86.0,
             93.0,
@@ -185,7 +256,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["carrot", "beet", "parsnip"],
             &["vegan", "vegetarian", "gluten-free"],
             &[],
-            13.0,
+            1300,
             9.0,
             78.0,
             91.0,
@@ -198,7 +269,7 @@ pub fn menu_items() -> Vec<MenuItem> {
             &["chocolate"],
             &["vegetarian", "gluten-free"],
             &["eggs"],
-            14.0,
+            1400,
             5.0,
             92.0,
             89.0,
@@ -277,8 +348,12 @@ pub fn tables() -> Vec<Table> {
     use DiningArea::*;
     use TableStatus::*;
     vec![
-        table("t1", "T1", 2, Window, Available, true, "server-2", None, None, 0.0),
-        table("t2", "T2", 4, Window, Available, true, "server-2", None, None, 0.0),
+        table(
+            "t1", "T1", 2, Window, Available, true, "server-2", None, None, 0.0,
+        ),
+        table(
+            "t2", "T2", 4, Window, Available, true, "server-2", None, None, 0.0,
+        ),
         table(
             "t3",
             "T3",
@@ -291,12 +366,24 @@ pub fn tables() -> Vec<Table> {
             Some("2026-08-09T21:35:00.000Z"),
             54.0,
         ),
-        table("t4", "T4", 6, Main, Available, true, "server-1", None, None, 0.0),
-        table("t5", "T5", 4, Main, Clearing, false, "server-1", None, None, 8.0),
-        table("t6", "T6", 2, Bar, Available, false, "server-2", None, None, 0.0),
-        table("t7", "T7", 4, Patio, Available, true, "server-3", None, None, 0.0),
-        table("t8", "T8", 6, Patio, Reserved, true, "server-3", None, None, 25.0),
-        table("t9", "T9", 8, Main, Available, true, "server-1", None, None, 0.0),
+        table(
+            "t4", "T4", 6, Main, Available, true, "server-1", None, None, 0.0,
+        ),
+        table(
+            "t5", "T5", 4, Main, Clearing, false, "server-1", None, None, 8.0,
+        ),
+        table(
+            "t6", "T6", 2, Bar, Available, false, "server-2", None, None, 0.0,
+        ),
+        table(
+            "t7", "T7", 4, Patio, Available, true, "server-3", None, None, 0.0,
+        ),
+        table(
+            "t8", "T8", 6, Patio, Reserved, true, "server-3", None, None, 25.0,
+        ),
+        table(
+            "t9", "T9", 8, Main, Available, true, "server-1", None, None, 0.0,
+        ),
     ]
 }
 

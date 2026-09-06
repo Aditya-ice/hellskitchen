@@ -10,19 +10,20 @@ use tauri::{AppHandle, Manager};
 use crate::{ui, Desktop};
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let tray = TrayIconBuilder::with_id("ember")
-        .icon(app.default_window_icon().cloned().ok_or_else(|| {
-            tauri::Error::AssetNotFound("the bundled application icon".into())
-        })?)
-        .icon_as_template(true)
-        .tooltip("Ember POS")
-        .on_tray_icon_event(|tray, event| {
-            // Clicking the menu-bar item brings the POS forward.
-            if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                ui::focus_main_window(tray.app_handle());
-            }
-        })
-        .build(app)?;
+    let tray =
+        TrayIconBuilder::with_id("ember")
+            .icon(app.default_window_icon().cloned().ok_or_else(|| {
+                tauri::Error::AssetNotFound("the bundled application icon".into())
+            })?)
+            .icon_as_template(true)
+            .tooltip("Ember POS")
+            .on_tray_icon_event(|tray, event| {
+                // Clicking the menu-bar item brings the POS forward.
+                if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                    ui::focus_main_window(tray.app_handle());
+                }
+            })
+            .build(app)?;
 
     let Some(desktop) = app.try_state::<Desktop>() else {
         return Ok(());
@@ -92,10 +93,12 @@ mod tests {
             &Action {
                 id: id.into(),
                 at: chrono::Utc::now().to_rfc3339(),
+                actor: None,
                 kind,
             },
         )
-        .expect("action applied")
+        .expect("the action should be allowed")
+        .expect("the action should change the floor")
     }
 
     #[test]

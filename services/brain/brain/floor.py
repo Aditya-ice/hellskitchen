@@ -14,7 +14,7 @@ always rendered as blocked, with its reason attached.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -23,6 +23,23 @@ import httpx
 def _amount(value: float) -> str:
     """Renders 18.0 as "18" and 4.5 as "4.5"."""
     return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _rows(source: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Read a list of JSON objects out of an untyped payload.
+
+    Everything the client returns is `response.json()`, so the boundary is
+    genuinely `Any`. This narrows it in one place, and treats a payload whose
+    shape disagrees with the contract as absent rather than raising deep inside
+    a formatter.
+    """
+    value = source.get(key, [])
+    return value if isinstance(value, list) else []
+
+
+def _object(payload: Any) -> dict[str, Any]:
+    """Narrow a decoded JSON body to an object, as every endpoint here returns."""
+    return payload if isinstance(payload, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -35,37 +52,39 @@ class Floor:
     summary: dict[str, Any]
 
     def guests(self) -> list[dict[str, Any]]:
-        return self.state.get("guests", [])
+        return _rows(self.state, "guests")
 
     def tables(self) -> list[dict[str, Any]]:
-        return self.state.get("tables", [])
+        return _rows(self.state, "tables")
 
     def orders(self) -> list[dict[str, Any]]:
-        return self.state.get("orders", [])
+        return _rows(self.state, "orders")
 
     def ingredients(self) -> list[dict[str, Any]]:
-        return self.state.get("ingredients", [])
+        return _rows(self.state, "ingredients")
 
     def menu_items(self) -> list[dict[str, Any]]:
-        return self.menu.get("menuItems", [])
+        return _rows(self.menu, "menuItems")
 
     def dish_name(self, menu_item_id: str) -> str:
         for item in self.menu_items():
             if item["id"] == menu_item_id:
-                return item["name"]
+                return str(item["name"])
         return menu_item_id
 
     def table_label(self, table_id: str | None) -> str:
         for table in self.tables():
             if table["id"] == table_id:
-                return table["label"]
+                return str(table["label"])
         return "—"
 
     def find_guest(self, needle: str) -> dict[str, Any] | None:
-        """Matches on id first, then on name, case-insensitively.
+        """Matches on id first, then on exact name, then on a *unique* partial.
 
         Staff refer to guests by name, so an agent asked about "Maya" must not
-        need the internal id.
+        need the internal id — but a partial that matches two people is not an
+        answer, and returning one of them would put the wrong guest's allergies
+        in front of a server. Ambiguity returns `None` so the agent asks.
         """
         wanted = needle.strip().lower()
         for guest in self.guests():
@@ -74,10 +93,15 @@ class Floor:
         for guest in self.guests():
             if guest["name"].lower() == wanted:
                 return guest
-        for guest in self.guests():
-            if wanted and wanted in guest["name"].lower():
-                return guest
-        return None
+
+        # The substring pass used to return whichever partial match came first.
+        # With two Mayas on the floor that reads out the wrong party's
+        # allergies, with full confidence and no sign anything went wrong.
+        # Ambiguity has to be admitted, not resolved by list order.
+        if not wanted:
+            return None
+        partial = [guest for guest in self.guests() if wanted in guest["name"].lower()]
+        return partial[0] if len(partial) == 1 else None
 
 
 # --- formatters -----------------------------------------------------------
@@ -121,8 +145,7 @@ def describe_floor(floor: Floor) -> str:
             None,
         )
         detail = (
-            f"- {table['label']}: seats {table['capacity']}, {table['area']}, "
-            f"{table['status']}"
+            f"- {table['label']}: seats {table['capacity']}, {table['area']}, {table['status']}"
         )
         if table.get("accessible"):
             detail += ", accessible"
@@ -143,7 +166,8 @@ def describe_guest(floor: Floor, guest: dict[str, Any]) -> str:
     # Allergies first and unabbreviated. This is the one thing in the whole
     # view that must never be summarised away.
     lines.append(
-        "Allergies: " + (", ".join(guest["allergies"]) if guest.get("allergies") else "none recorded")
+        "Allergies: "
+        + (", ".join(guest["allergies"]) if guest.get("allergies") else "none recorded")
     )
     lines.append(
         "Dietary needs: "
@@ -164,7 +188,9 @@ def describe_guest(floor: Floor, guest: dict[str, Any]) -> str:
     order = next((o for o in floor.orders() if o["guestId"] == guest["id"]), None)
     if order:
         lines.append("")
-        lines.append(f"Order {order['id']}: {order['status']}, {floor.table_label(order.get('tableId'))}")
+        lines.append(
+            f"Order {order['id']}: {order['status']}, {floor.table_label(order.get('tableId'))}"
+        )
         for line in order.get("lines", []):
             lines.append(f"  {line['quantity']}x {floor.dish_name(line['menuItemId'])}")
         if order.get("guestNotes"):
@@ -203,7 +229,7 @@ def describe_stock(floor: Floor) -> str:
 
 
 def describe_tickets(floor: Floor, now: datetime | None = None) -> str:
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     open_tickets = [o for o in floor.orders() if o["status"] == "sent"]
     if not open_tickets:
         return "No open tickets: the pass is clear."
@@ -246,9 +272,7 @@ def describe_recommendations(payload: dict[str, Any], floor: Floor) -> str:
             if dish.get("warnings"):
                 line += " | caution: " + "; ".join(dish["warnings"])
         else:
-            line = f"- {name}: BLOCKED — " + "; ".join(
-                dish.get("warnings", ["not available"])
-            )
+            line = f"- {name}: BLOCKED — " + "; ".join(dish.get("warnings", ["not available"]))
         lines.append(line)
 
     lines.extend(["", "Tables:"])
@@ -288,17 +312,17 @@ class FloorClient:
         if self._client is not None:
             response = await self._client.get(f"{self.base_url}{path}")
             response.raise_for_status()
-            return response.json()
+            return _object(response.json())
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{self.base_url}{path}")
             response.raise_for_status()
-            return response.json()
+            return _object(response.json())
 
     async def read(self) -> Floor:
         revision = await self._get("/api/state")
         return Floor(
-            version=revision.get("version", -1),
-            state=revision.get("state", {}),
+            version=int(revision.get("version", -1)),
+            state=_object(revision.get("state", {})),
             menu=await self._get("/api/menu"),
             summary=await self._get("/api/summary"),
         )
@@ -313,7 +337,48 @@ class FloorClient:
         suffix = "" if rerank else "?rerank=false"
         return await self._get(f"/api/recommendations/{guest_id}{suffix}")
 
-    async def action_log(self, since: int = 0, limit: int = 2000) -> list[dict[str, Any]]:
-        """The append-only log: what the forecaster and reranker learn from."""
-        payload = await self._get(f"/api/actions/log?since={since}&limit={limit}")
-        return payload.get("entries", [])
+    #: Rows per request. The server clamps to this, so asking for more is moot.
+    PAGE_SIZE = 2000
+
+    async def action_log(self, since: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+        """The append-only log: what the forecaster and reranker learn from.
+
+        Paged to the end rather than asking for one fixed slice. The endpoint is
+        oldest-first, so a single `since=0&limit=2000` request returned the
+        *first* 2000 actions ever recorded — meaning that once a persistent log
+        passed that mark, the forecaster and the reranker were permanently
+        reasoning about ancient history while still reporting themselves
+        available. `limit` caps the total returned, most-recent page last.
+        """
+        collected: list[dict[str, Any]] = []
+        cursor = since
+
+        # Start near the end rather than at row zero. Paging the whole log on
+        # every forecast made each call cost more as the log grew — taking the
+        # server's store mutex once per page — while `replay` then discarded
+        # everything older than its window anyway.
+        if since == 0 and limit is not None:
+            head = await self._get("/api/actions/log?since=0&limit=1")
+            latest = head.get("latestSeq")
+            if isinstance(latest, int):
+                cursor = max(0, latest - limit)
+
+        while True:
+            payload = await self._get(f"/api/actions/log?since={cursor}&limit={self.PAGE_SIZE}")
+            page = _rows(payload, "entries")
+            collected.extend(page)
+
+            if len(page) < self.PAGE_SIZE:
+                break
+
+            next_cursor = page[-1].get("seq")
+            # Without a usable cursor the next request would repeat this page
+            # forever; stopping with what we have beats spinning.
+            if not isinstance(next_cursor, int) or next_cursor <= cursor:
+                break
+            cursor = next_cursor
+
+            if limit is not None and len(collected) >= limit:
+                break
+
+        return collected[-limit:] if limit is not None else collected

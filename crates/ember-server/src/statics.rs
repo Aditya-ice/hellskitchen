@@ -17,6 +17,22 @@ use tower_http::services::ServeDir;
 use crate::AppState;
 
 pub async fn serve(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let path = request.uri().path().trim_start_matches('/').to_string();
+
+    // An unmatched /api/* path is a client calling an endpoint that does not
+    // exist. Without this it falls through to the index.html candidate below
+    // and comes back as 200 HTML, so a typo in a URL looks like a successful
+    // request that returned an unparseable body.
+    if path == "api" || path.starts_with("api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": format!("No such endpoint: /{path}"),
+            })),
+        )
+            .into_response();
+    }
+
     let Some(directory) = state.config.static_dir.clone() else {
         return (
             StatusCode::NOT_FOUND,
@@ -27,18 +43,22 @@ pub async fn serve(State(state): State<Arc<AppState>>, request: Request<Body>) -
             .into_response();
     };
 
-    let path = request.uri().path().trim_start_matches('/').to_string();
-
-    // `/pos` → pos.html → pos/index.html; `/` → index.html. A miss falls back
-    // to index.html so client-side routes still boot.
+    // `/pos` → pos.html → pos/index.html; `/` → index.html.
+    //
+    // The SPA fallback applies only to extension-less paths. A request for a
+    // missing `.js` chunk — a stale `_next` hash after a rebuild, a partly
+    // copied bundle — used to fall through to index.html and answer 200 with
+    // HTML, so the browser failed on the MIME type and no cache or client
+    // could tell the asset was gone.
+    let looks_like_a_file = path.contains('.');
     let mut candidates = vec![path.clone()];
     if path.is_empty() {
         candidates.push("index.html".into());
-    } else if !path.contains('.') {
+    } else if !looks_like_a_file {
         candidates.push(format!("{path}.html"));
         candidates.push(format!("{path}/index.html"));
+        candidates.push("index.html".into());
     }
-    candidates.push("index.html".into());
 
     for candidate in candidates {
         let probe = Request::builder()

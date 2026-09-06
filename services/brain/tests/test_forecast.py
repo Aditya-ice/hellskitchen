@@ -5,7 +5,7 @@ refuses to sound more certain than the data allows, and that it does not bury
 a real risk under irrelevant ones.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from brain.forecast import (
     FAIR_EVIDENCE_FIRES,
@@ -16,7 +16,6 @@ from brain.forecast import (
     forecast_stockouts,
 )
 from brain.history import replay
-
 from tests.test_history import T0, add, entry, fire
 
 MENU = [
@@ -121,7 +120,9 @@ class TestStockoutRisks:
     def test_ignores_what_will_comfortably_last(self):
         history = service(tickets=4)
         now = (history.first_at or T0) + timedelta(hours=1)
-        risks = forecast_stockouts(history, ingredients(carrot=500.0), MENU, now, horizon_minutes=90)
+        risks = forecast_stockouts(
+            history, ingredients(carrot=500.0), MENU, now, horizon_minutes=90
+        )
         assert risks == []
 
     def test_reports_the_soonest_first(self):

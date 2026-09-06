@@ -154,8 +154,9 @@ def rerank(
             # truncating, which silently dropped the one reason that explains
             # why the dish moved.
             engine_reasons = list(entry.get("reasons", []))[:2]
-            entry["reasons"] = engine_reasons + [
-                f"Ordered {ordered} time{'' if ordered == 1 else 's'} tonight"
+            entry["reasons"] = [
+                *engine_reasons,
+                f"Ordered {ordered} time{'' if ordered == 1 else 's'} tonight",
             ]
         eligible.append(entry)
 

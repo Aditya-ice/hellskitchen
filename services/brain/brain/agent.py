@@ -12,9 +12,10 @@ to reconsider it.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal, cast, get_args
 
 from anthropic import AsyncAnthropic, beta_async_tool
 
@@ -27,7 +28,25 @@ from .floor import (
     describe_tickets,
 )
 
-MODEL = "claude-opus-5"
+MODEL = os.environ.get("EMBER_BRAIN_MODEL", "claude-opus-5")
+
+#: The reasoning-effort levels the API accepts. Typing this rather than taking a
+#: bare string means a misspelled EMBER_BRAIN_EFFORT is refused at startup with
+#: a readable message, instead of becoming a 400 that surfaces to staff as the
+#: generic "the floor agent is unavailable".
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+EFFORT_LEVELS: tuple[str, ...] = get_args(Effort)
+
+
+def parse_effort(value: str) -> Effort:
+    """Validate a configured effort level, naming the alternatives if it is wrong."""
+    if value not in EFFORT_LEVELS:
+        raise ValueError(
+            f"unknown reasoning effort {value!r}; expected one of {', '.join(EFFORT_LEVELS)}"
+        )
+    return cast(Effort, value)
+
 
 SYSTEM_PROMPT = """You are the floor agent for Ember & Ash, a restaurant. \
 You answer questions from hosts and servers about the service happening right now.
@@ -66,11 +85,11 @@ class FloorAgent:
         anthropic_client: AsyncAnthropic | None = None,
         *,
         model: str = MODEL,
-        effort: str = "medium",
+        effort: Effort = "medium",
     ) -> None:
         self.floor_client = floor_client
         self.model = model
-        self.effort = effort
+        self.effort: Effort = effort
         # Constructed lazily so the service can start, and report itself
         # unconfigured, without credentials present.
         self._anthropic = anthropic_client
@@ -101,9 +120,7 @@ class FloorAgent:
         return describe_stock(await self.floor_client.read())
 
     async def read_tickets(self, now: datetime | None = None) -> str:
-        return describe_tickets(
-            await self.floor_client.read(), now or datetime.now(timezone.utc)
-        )
+        return describe_tickets(await self.floor_client.read(), now or datetime.now(UTC))
 
     async def read_ranking(self, name_or_id: str) -> str:
         floor = await self.floor_client.read()
@@ -192,9 +209,10 @@ class FloorAgent:
                 stop_reason=final.stop_reason,
             )
 
-        text = "\n".join(
-            block.text for block in final.content if getattr(block, "type", None) == "text"
-        ).strip()
+        # `block.type` rather than getattr: it is the union's discriminator, so
+        # this narrows to the text blocks instead of duck-typing across a
+        # dozen block kinds that have no `.text`.
+        text = "\n".join(block.text for block in final.content if block.type == "text").strip()
 
         return AgentAnswer(
             text=text or "No answer was produced.",

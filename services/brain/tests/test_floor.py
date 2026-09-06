@@ -1,6 +1,6 @@
 """The formatters are what the model reads, so they are what these test."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from brain.floor import (
     Floor,
@@ -86,7 +86,14 @@ def floor(orders: list | None = None) -> Floor:
         if orders is None
         else orders,
         "ingredients": [
-            {"id": "carrot", "name": "Carrots", "onHand": 0, "par": 18, "unit": "lb", "aliases": []},
+            {
+                "id": "carrot",
+                "name": "Carrots",
+                "onHand": 0,
+                "par": 18,
+                "unit": "lb",
+                "aliases": [],
+            },
             {
                 "id": "beet",
                 "name": "Golden beets",
@@ -202,7 +209,7 @@ class TestDescribeStock:
 
 class TestDescribeTickets:
     def test_reports_age_from_when_the_ticket_was_fired(self):
-        text = describe_tickets(floor(), datetime(2026, 8, 26, 18, 34, tzinfo=timezone.utc))
+        text = describe_tickets(floor(), datetime(2026, 8, 26, 18, 34, tzinfo=UTC))
         assert "24 min old" in text
         assert "T2 (Maya Chen)" in text
 
@@ -280,3 +287,38 @@ class TestDescribeRecommendations:
         }
         text = describe_recommendations(payload, floor())
         assert "BLOCKED — Contains guest allergen: tree nuts" in text
+
+
+class TestAmbiguousGuestNames:
+    def _floor(self, *names: str):
+        from brain.floor import Floor
+
+        return Floor(
+            version=1,
+            state={
+                "guests": [
+                    {"id": f"guest-{i}", "name": name, "allergies": [], "dietaryNeeds": []}
+                    for i, name in enumerate(names)
+                ]
+            },
+            menu={},
+            summary={},
+        )
+
+    def test_a_unique_partial_still_matches(self):
+        floor = self._floor("Maya Chen", "Noah Reid")
+        found = floor.find_guest("maya")
+        assert found is not None
+        assert found["name"] == "Maya Chen"
+
+    def test_an_ambiguous_partial_is_refused(self):
+        # Returning the first match put the wrong party's allergies in front of
+        # a server, with full confidence and nothing to signal the mistake.
+        floor = self._floor("Maya Chen", "Maya Patel")
+        assert floor.find_guest("maya") is None
+
+    def test_an_exact_name_wins_over_an_ambiguous_partial(self):
+        floor = self._floor("Maya", "Maya Patel")
+        found = floor.find_guest("Maya")
+        assert found is not None
+        assert found["name"] == "Maya"

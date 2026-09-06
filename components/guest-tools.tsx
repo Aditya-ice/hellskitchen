@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import type { TavilyContext } from "@/lib/domain";
-import { apiUrl, ensureDemoSession } from "@/lib/pos-client";
+import { apiUrl } from "@/lib/pos-client";
 import { usePos } from "@/components/pos-provider";
 
 /** Shown when Tavily is unavailable; the kitchen is the source of truth. */
@@ -39,7 +39,6 @@ export function GuestTools() {
     setContext(null);
     setError(null);
     try {
-      await ensureDemoSession();
       const response = await fetch(apiUrl("/api/tavily/search"), {
         credentials: "include",
         method: "POST",

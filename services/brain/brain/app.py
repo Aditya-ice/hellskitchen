@@ -8,18 +8,26 @@ the contract is one health check and one question endpoint.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from .agent import MODEL, FloorAgent
+from .agent import MODEL, FloorAgent, parse_effort
 from .floor import FloorClient
 from .forecast import build_forecast
 from .history import replay
 from .rank import build_ranking
 
 EMBER_URL = os.environ.get("EMBER_URL", "http://127.0.0.1:4000")
-EFFORT = os.environ.get("EMBER_BRAIN_EFFORT", "medium")
+
+#: How much of the log a forecast or a ranking reads.
+#:
+#: Generous for one service and bounded, so the cost of a forecast does not grow
+#: with the lifetime of the database.
+RECENT_ACTIONS = 5000
+EFFORT = parse_effort(os.environ.get("EMBER_BRAIN_EFFORT", "medium"))
 
 app = FastAPI(title="Ember POS brain", version="0.1.0")
 
@@ -49,7 +57,7 @@ class RankRequest(BaseModel):
     guest_id: str = Field(min_length=1, max_length=200, alias="guestId")
     #: The engine's ranking. Supplied by ember-server so this does not have to
     #: fetch it back — which would recurse, because that endpoint calls here.
-    dishes: list[dict] | None = None
+    dishes: list[dict[str, Any]] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -87,8 +95,8 @@ async def forecast(horizon_minutes: float = 90.0) -> dict[str, object]:
     client = _floor_client()
     try:
         floor = await client.read()
-        history = replay(await client.action_log())
-    except Exception as error:  # noqa: BLE001 — an optional service must not shout
+        history = replay(await client.action_log(limit=RECENT_ACTIONS), now=datetime.now(UTC))
+    except Exception as error:
         print(f"forecast failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}
 
@@ -119,8 +127,8 @@ async def rank(body: RankRequest) -> dict[str, object]:
             # into this endpoint and looping.
             payload = await client.recommendations(guest["id"], rerank=False)
             dishes = payload.get("dishes", [])
-        history = replay(await client.action_log())
-    except Exception as error:  # noqa: BLE001
+        history = replay(await client.action_log(limit=RECENT_ACTIONS), now=datetime.now(UTC))
+    except Exception as error:
         print(f"rank failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}
 
@@ -140,7 +148,7 @@ async def ask(body: Question) -> Answer:
 
     try:
         result = await _agent().ask(body.question)
-    except Exception as error:  # noqa: BLE001 — the POS must survive any failure here
+    except Exception as error:
         # The agent is an enhancement. A failure here is reported as an answer
         # the staff can act on, never as an error that interrupts service.
         print(f"floor agent failed: {type(error).__name__}: {error}")
