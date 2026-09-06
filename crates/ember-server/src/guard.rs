@@ -161,11 +161,19 @@ impl RateLimiter {
             ("direct", Some(address)) => address.to_string(),
             (value, _) => value.to_string(),
         };
-        let identity = format!(
-            "{}:{}",
-            caller,
-            crate::session::session_cookie(headers).unwrap_or("anonymous")
-        );
+        // Caller only. The session cookie is part of the identity for
+        // authenticated scopes -- two staff behind one NAT address should not
+        // share a bucket -- but on the pre-auth sign-in path it is a value the
+        // caller invents, so including it let anyone mint a fresh bucket per
+        // request and walk straight through the limit this exists to impose.
+        let identity = match peer {
+            Some(_) => caller,
+            None => format!(
+                "{}:{}",
+                caller,
+                crate::session::session_cookie(headers).unwrap_or("anonymous")
+            ),
+        };
         let key = format!("{scope}:{identity}");
         let now = Instant::now();
 

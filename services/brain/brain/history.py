@@ -123,12 +123,22 @@ def replay(
         at = parse_time(action.get("at"))
         kind = action.get("type")
 
-        # A reset still applies from outside the window: it is the strongest
-        # possible statement that what came before is over.
-        if horizon is not None and at is not None and at < horizon and kind != "reset":
+        # Outside the window, only two kinds of event still matter.
+        #
+        # A reset, because it is the strongest possible statement that what came
+        # before is over. And the draft edits that a ticket fired *inside* the
+        # window is built from: dropping those left `send-order` with no lines,
+        # so a ticket straddling the horizon was discarded entirely and the burn
+        # rate came out low — in the direction that makes a stockout look
+        # further away than it is.
+        stale = horizon is not None and at is not None and at < horizon
+        if stale and kind not in ("reset", "add-order-item", "remove-order-item"):
             continue
 
-        if at is not None:
+        # The span is how long *this service* covers, so a draft edit carried in
+        # from before the window must not widen it — that would reintroduce the
+        # deflated burn rate this window exists to prevent.
+        if at is not None and not stale:
             history.first_at = at if history.first_at is None else min(history.first_at, at)
             history.last_at = at if history.last_at is None else max(history.last_at, at)
 

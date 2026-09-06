@@ -353,6 +353,16 @@ class FloorClient:
         collected: list[dict[str, Any]] = []
         cursor = since
 
+        # Start near the end rather than at row zero. Paging the whole log on
+        # every forecast made each call cost more as the log grew — taking the
+        # server's store mutex once per page — while `replay` then discarded
+        # everything older than its window anyway.
+        if since == 0 and limit is not None:
+            head = await self._get("/api/actions/log?since=0&limit=1")
+            latest = head.get("latestSeq")
+            if isinstance(latest, int):
+                cursor = max(0, latest - limit)
+
         while True:
             payload = await self._get(f"/api/actions/log?since={cursor}&limit={self.PAGE_SIZE}")
             page = _rows(payload, "entries")

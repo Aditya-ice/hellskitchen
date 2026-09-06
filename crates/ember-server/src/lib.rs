@@ -39,6 +39,10 @@ pub struct AppState {
     pub store: Store,
     pub config: Config,
     updates: broadcast::Sender<Revision>,
+    /// Flipped when the process is asked to stop, so long-lived responses can
+    /// end themselves. Without it graceful shutdown waits on connection tasks
+    /// that never finish, and a `docker stop` mid-service hangs until SIGKILL.
+    shutdown: tokio::sync::watch::Sender<bool>,
     limiter: guard::RateLimiter,
     http: reqwest::Client,
 }
@@ -60,6 +64,7 @@ impl AppState {
             store,
             config,
             updates,
+            shutdown: tokio::sync::watch::channel(false).0,
             limiter: guard::RateLimiter::new(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
@@ -70,6 +75,16 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Revision> {
         self.updates.subscribe()
+    }
+
+    /// Watches for the process being asked to stop.
+    pub fn shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    /// Tells every long-lived response to wind up.
+    pub fn begin_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     /// Applies an action and, if it changed anything, tells every subscriber.
@@ -111,9 +126,18 @@ pub fn router(state: Shared) -> Router {
         .route("/api/tavily/search", post(tavily_search))
         .fallback(statics::serve)
         .with_state(state)
-        // Outermost so it also covers the fallback and any rejection: every
-        // request gets a span carrying its own id, which is the only way to
-        // follow one through the log once more than one terminal is busy.
+        // 2 MB of guest name would be written to the append-only log forever.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // A request that never finishes holds a connection and, for the store
+        // routes, a slot behind the global mutex.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        // Last, and therefore outermost: axum applies chained layers
+        // inside-out. Registered before the timeout, a request the timeout
+        // killed had its inner future dropped and never recorded a response --
+        // losing exactly the requests worth having in the log.
         .layer(
             tower_http::trace::TraceLayer::new_for_http().make_span_with(
                 |request: &axum::http::Request<_>| {
@@ -126,15 +150,6 @@ pub fn router(state: Shared) -> Router {
                 },
             ),
         )
-        // A request that never finishes holds a connection and, for the store
-        // routes, a slot behind the global mutex. SSE is exempt: it is
-        // long-lived by design.
-        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
-        // 2 MB of guest name would be written to the append-only log forever.
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 /// How long a non-streaming request may take before it is cut off.
@@ -434,15 +449,29 @@ async fn auth_login(
             );
             Ok(response)
         }
-        // A wrong PIN and an unknown staff id answer identically and take the
-        // same time, so neither can be used to enumerate the roster.
+        // These two answer identically and take the same time.
         //
-        // The remaining-attempts count used to be appended here and not to the
-        // unknown-staff reply, which made the two distinguishable by exactly
-        // the sentence meant to reassure staff: one guess per candidate id
-        // sorted real names from invented ones. Staff still learn they are
-        // locked out when it happens, from the 423 below.
-        AuthOutcome::WrongPin { .. } | AuthOutcome::UnknownStaff => Err(ApiError(
+        // That is not, on its own, enough to stop someone enumerating the
+        // roster: only a real staff id can lock, so six wrong guesses still
+        // separate a real id (423) from an invented one (401). Closing that
+        // properly would mean either tracking failures for ids that do not
+        // exist, or refusing to tell a member of staff why their PIN stopped
+        // working for five minutes.
+        //
+        // The second is the worse trade. The roster is five names on a venue
+        // LAN and knowing them buys an attacker nothing they can use — the
+        // lockout is what stops guessing — whereas a server locked out mid
+        // service with no explanation is a genuine failure, every service. So
+        // the count is here deliberately, and the enumeration is accepted.
+        AuthOutcome::WrongPin { attempts_remaining } => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "That PIN was not recognised. {attempts_remaining} attempt{} left before this \
+                 account locks.",
+                if attempts_remaining == 1 { "" } else { "s" }
+            ),
+        )),
+        AuthOutcome::UnknownStaff => Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "That PIN was not recognised.".into(),
         )),
@@ -503,7 +532,14 @@ async fn auth_me(
 /// Deliberately small: what an operator needs mid-service is how much has
 /// happened, whether the store is erroring, and how many screens are attached —
 /// not a histogram of everything.
-async fn metrics(State(state): State<Shared>) -> ApiResult<String> {
+/// Gated like everything else: on the LAN deployment this server advertises,
+/// an anonymous caller could otherwise read the action count, the live revision
+/// and the number of attached terminals, and take the global store mutex twice
+/// per request with no limit.
+async fn metrics(
+    State(state): State<Shared>,
+    CurrentSession(_): CurrentSession,
+) -> ApiResult<String> {
     let revision = state.store.revision()?;
     let actions = state.store.action_count()?;
 
@@ -633,6 +669,16 @@ async fn actions(
 /// How often an open stream re-checks that its session is still valid.
 const STREAM_SESSION_CHECK: Duration = Duration::from_secs(60);
 
+/// One thing arriving on an open event stream.
+enum Frame {
+    /// A new floor revision to push to the client.
+    Revision(Box<Revision>),
+    /// Time to re-check that the session behind this stream still exists.
+    CheckSession,
+    /// The process is stopping.
+    Stop,
+}
+
 async fn stream(
     State(state): State<Shared>,
     CurrentSession(_): CurrentSession,
@@ -646,40 +692,57 @@ async fn stream(
 
     let first = futures::stream::once(async move { initial });
     let rest = BroadcastStream::new(receiver).filter_map(|item| async move { item.ok() });
+    let revisions = first
+        .chain(rest)
+        .map(|revision| Frame::Revision(Box::new(revision)));
 
-    let revisions = first.chain(rest).map(|revision| {
-        Ok(Event::default()
-            .event("state")
-            .data(serde_json::to_string(&revision).unwrap_or_default()))
-    });
-
-    // The session is resolved once, when the stream opens. Without this the
-    // connection then outlives it indefinitely: a terminal abandoned on the
+    // The session is resolved once, when the stream opens, so without a
+    // periodic re-check the connection outlives it: a terminal abandoned on the
     // pass keeps receiving guest names, allergies and dietary needs long past
-    // the idle expiry, which is the exact risk that expiry exists for. Its
-    // writes fail, but the data keeps arriving.
-    //
-    // Ticks also slide the idle window, so a screen someone is actively
-    // watching stays signed in.
-    let token = session::session_cookie(&headers).map(str::to_string);
+    // the idle expiry, which is the exact risk that expiry exists for.
     let checks = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval_at(
         tokio::time::Instant::now() + STREAM_SESSION_CHECK,
         STREAM_SESSION_CHECK,
     ))
-    .map(move |_| Err(token.clone()));
+    .map(|_| Frame::CheckSession);
 
-    let guarded = futures::stream::select(revisions.map(Ok), checks)
-        .take_while(move |item| {
-            let alive = match item {
-                Ok(_) => true,
-                Err(token) => token
+    // Shutdown has to arrive *as an item*, not be read when one happens to
+    // turn up. `take_while` only runs its predicate on the next element, and on
+    // a quiet floor that is a session-check tick up to a minute away — so
+    // checking a flag inside the predicate left `docker stop` hanging on the
+    // connection task until SIGKILL, which is what graceful shutdown was added
+    // to avoid.
+    let mut stopping = state.shutdown_rx();
+    let stop = futures::stream::once(async move {
+        let _ = stopping.wait_for(|asked| *asked).await;
+        Frame::Stop
+    });
+
+    let token = session::session_cookie(&headers).map(str::to_string);
+    let guarded = futures::stream::select(futures::stream::select(revisions, checks), stop)
+        .take_while(move |frame| {
+            let alive = match frame {
+                Frame::Revision(_) => true,
+                Frame::Stop => false,
+                // `session_peek`, not `session`: the latter slides the idle
+                // window on every read, so a check once a minute would renew
+                // the very session it is testing and keep an abandoned
+                // terminal subscribed indefinitely.
+                Frame::CheckSession => token
                     .as_deref()
-                    .and_then(|token| state.store.session(token, Utc::now()).ok().flatten())
+                    .and_then(|token| state.store.session_peek(token, Utc::now()).ok().flatten())
                     .is_some(),
             };
-            async move { alive }
+            std::future::ready(alive)
         })
-        .filter_map(|item| async move { item.ok() });
+        .filter_map(|frame| async move {
+            match frame {
+                Frame::Revision(revision) => Some(Ok(Event::default()
+                    .event("state")
+                    .data(serde_json::to_string(&revision).unwrap_or_default()))),
+                _ => None,
+            }
+        });
 
     Ok(Sse::new(guarded).keep_alive(KeepAlive::default()))
 }
@@ -1091,6 +1154,7 @@ pub async fn serve(state: Shared) -> std::io::Result<()> {
 /// got before the window can be pointed at it, and must not race another
 /// process for it in between — so it binds first and hands the listener over.
 pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::io::Result<()> {
+    let stopping = state.clone();
     // `into_make_service_with_connect_info` is what makes the peer address
     // reachable from a handler. Without it the sign-in limiter has no way to
     // tell one caller from another and buckets the whole venue together.
@@ -1098,7 +1162,13 @@ pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Tell open event streams to end, then give them a moment to do it
+        // before the connection tasks are awaited.
+        stopping.begin_shutdown();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    })
     .await
 }
 

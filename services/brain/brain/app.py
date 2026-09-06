@@ -21,6 +21,12 @@ from .history import replay
 from .rank import build_ranking
 
 EMBER_URL = os.environ.get("EMBER_URL", "http://127.0.0.1:4000")
+
+#: How much of the log a forecast or a ranking reads.
+#:
+#: Generous for one service and bounded, so the cost of a forecast does not grow
+#: with the lifetime of the database.
+RECENT_ACTIONS = 5000
 EFFORT = parse_effort(os.environ.get("EMBER_BRAIN_EFFORT", "medium"))
 
 app = FastAPI(title="Ember POS brain", version="0.1.0")
@@ -89,7 +95,7 @@ async def forecast(horizon_minutes: float = 90.0) -> dict[str, object]:
     client = _floor_client()
     try:
         floor = await client.read()
-        history = replay(await client.action_log(), now=datetime.now(UTC))
+        history = replay(await client.action_log(limit=RECENT_ACTIONS), now=datetime.now(UTC))
     except Exception as error:
         print(f"forecast failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}
@@ -121,7 +127,7 @@ async def rank(body: RankRequest) -> dict[str, object]:
             # into this endpoint and looping.
             payload = await client.recommendations(guest["id"], rerank=False)
             dishes = payload.get("dishes", [])
-        history = replay(await client.action_log(), now=datetime.now(UTC))
+        history = replay(await client.action_log(limit=RECENT_ACTIONS), now=datetime.now(UTC))
     except Exception as error:
         print(f"rank failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}

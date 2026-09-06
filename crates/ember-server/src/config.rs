@@ -69,6 +69,37 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Reads the environment without insisting on a database.
+    ///
+    /// For an embedder that supplies its own storage — the desktop app does —
+    /// where refusing to start without `EMBER_DB` would be wrong, but dropping
+    /// every other configured value would be worse: building from
+    /// `Config::default()` instead silently disabled the ElevenLabs and Tavily
+    /// keys in the packaged app, so voice input and dish context stopped
+    /// working for anyone who had actually set them.
+    pub fn from_env_lenient() -> Self {
+        let defaults = Config::default();
+        Config {
+            host: env("EMBER_HOST").unwrap_or(defaults.host),
+            port: env("EMBER_PORT")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(defaults.port),
+            database: env("EMBER_DB").map(PathBuf::from),
+            static_dir: env("EMBER_STATIC_DIR").map(PathBuf::from),
+            elevenlabs_key: env("ELEVENLABS_API_KEY"),
+            tavily_key: env("TAVILY_API_KEY"),
+            elevenlabs_base: env("EMBER_ELEVENLABS_BASE").unwrap_or(defaults.elevenlabs_base),
+            tavily_base: env("EMBER_TAVILY_BASE").unwrap_or(defaults.tavily_base),
+            secure_cookies: env("EMBER_SECURE_COOKIES")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(defaults.secure_cookies),
+            trust_forwarded_for: env("EMBER_TRUST_PROXY")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(defaults.trust_forwarded_for),
+            brain_url: env("EMBER_BRAIN_URL"),
+        }
+    }
+
     /// Reads the environment, refusing to start on a misconfiguration.
     ///
     /// Both of the checks here used to be silent: a typo in `EMBER_PORT` bound

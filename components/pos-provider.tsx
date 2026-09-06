@@ -339,7 +339,30 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       onRevision: (next) => applyRevision(next, "stream"),
       onConnectedChange: setConnected,
     });
-  }, [applyRevision]);
+  }, [applyRevision, generation]);
+
+  // A revoked session looks exactly like a flaky network from here:
+  // `EventSource` cannot read the 401, so it just reconnects forever while the
+  // header says "Reconnecting…" over a floor that will never move again. The
+  // only way to tell the two apart is to ask.
+  useEffect(() => {
+    if (connected) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      fetchIdentity(controller.signal)
+        .then((state) => {
+          if (!state.authenticated) handleAuthFailure();
+        })
+        .catch((caught: unknown) => {
+          if (caught instanceof NotAuthenticatedError) handleAuthFailure();
+        });
+    }, 3_000);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [connected, handleAuthFailure]);
 
   const state = revision.state;
 

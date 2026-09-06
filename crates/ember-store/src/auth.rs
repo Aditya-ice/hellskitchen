@@ -286,6 +286,45 @@ impl Store {
         }))
     }
 
+    /// Resolves a token **without** sliding its idle window.
+    ///
+    /// `session` renews on every read, which is right for a request — using the
+    /// terminal is what keeps it signed in. It is wrong for anything that polls
+    /// on a timer: the open event stream re-checked its own session every
+    /// minute, and each check pushed the expiry another thirty minutes out, so
+    /// a screen abandoned on the pass stayed subscribed to guest names and
+    /// allergies forever. That is the exact case the idle expiry exists for.
+    pub fn session_peek(&self, token: &str, now: DateTime<Utc>) -> Result<Option<Session>> {
+        let connection = self.lock()?;
+        let row: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT staff_id, terminal_id, expires_at FROM sessions WHERE token_hash = ?1",
+                [hash_token(token)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+
+        let Some((staff_id, terminal_id, expires_at)) = row else {
+            return Ok(None);
+        };
+        let expires_at = DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|_| StoreError::PasswordHash)?
+            .with_timezone(&Utc);
+
+        if expires_at <= now {
+            return Ok(None);
+        }
+        Ok(Some(Session {
+            staff_id,
+            terminal_id,
+            expires_at,
+        }))
+    }
+
     /// Signs a terminal out.
     pub fn end_session(&self, token: &str) -> Result<()> {
         let connection = self.lock()?;
@@ -557,6 +596,30 @@ mod tests {
         // Left alone past the sliding deadline: gone.
         let abandoned = past_original + Duration::minutes(SESSION_IDLE_MINUTES + 1);
         assert!(store.session(&token, abandoned).unwrap().is_none());
+    }
+
+    #[test]
+    fn peeking_at_a_session_does_not_keep_it_alive() {
+        let store = store_with_pin("2468");
+        let (token, _) = granted(
+            store
+                .authenticate("server-1", "2468", "pass-1", now())
+                .unwrap(),
+        );
+
+        // A poller that renewed on every look would keep an abandoned terminal
+        // signed in forever, which is what the event stream was doing.
+        // Exclusive: at exactly SESSION_IDLE_MINUTES the session is already over.
+        for minute in 1..SESSION_IDLE_MINUTES {
+            let later = now() + Duration::minutes(minute);
+            assert!(store.session_peek(&token, later).unwrap().is_some());
+        }
+
+        let expired = now() + Duration::minutes(SESSION_IDLE_MINUTES + 1);
+        assert!(
+            store.session_peek(&token, expired).unwrap().is_none(),
+            "peeking must not have pushed the expiry out"
+        );
     }
 
     #[test]

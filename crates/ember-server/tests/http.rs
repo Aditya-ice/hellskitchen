@@ -675,7 +675,7 @@ async fn a_pin_cannot_be_set_for_someone_not_on_the_roster() {
 }
 
 #[tokio::test]
-async fn a_wrong_pin_and_an_unknown_staff_id_are_indistinguishable() {
+async fn a_failed_sign_in_never_says_whether_the_account_exists() {
     let app = app().await;
 
     let wrong = app
@@ -691,10 +691,32 @@ async fn a_wrong_pin_and_an_unknown_staff_id_are_indistinguishable() {
         ))
         .await;
 
-    // The remaining-attempts count used to be appended to one and not the
-    // other, so one guess per candidate id sorted real staff from invented.
-    assert_eq!(wrong.0, unknown.0);
-    assert_eq!(wrong.1["error"], unknown.1["error"]);
+    // Same status either way, and neither reply names the account.
+    //
+    // Note what this does *not* claim: only a real id can lock, so six wrong
+    // guesses still tell the two apart by the 423. That is accepted
+    // deliberately — see the comment on the login handler. Hiding it would
+    // mean refusing to tell a member of staff why their PIN stopped working.
+    assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown.0, StatusCode::UNAUTHORIZED);
+
+    for body in [&wrong.1, &unknown.1] {
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("not recognised"), "{message}");
+        assert!(
+            !message.contains(common::STAFF_ID) && !message.contains("not-a-person"),
+            "a failed sign-in must not echo the id back: {message}"
+        );
+    }
+
+    // Staff do get the warning that matters: how close they are to a lockout.
+    assert!(
+        wrong.1["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("attempt")),
+        "a known account should warn before it locks, got {:?}",
+        wrong.1["error"]
+    );
 }
 
 #[tokio::test]

@@ -206,3 +206,19 @@ class TestServiceWindow:
         # having events silently dropped against an implicit "now".
         history = replay([add("beet-salad", self.STALE_MINUTES), fire(self.STALE_MINUTES + 1)])
         assert len(history.fires) == 1
+
+    def test_a_ticket_straddling_the_horizon_keeps_its_lines(self):
+        # Added just before the window opens, fired just inside it. Dropping the
+        # adds left `send-order` with nothing on it, so the ticket vanished and
+        # the burn rate came out low -- making a stockout look further away
+        # than it is, which is the wrong direction to be wrong in.
+        now = T0 + timedelta(hours=2)
+        history = replay(
+            [add("beet-salad", self.STALE_MINUTES), add("beet-salad", 1), fire(2)],
+            now=now,
+        )
+
+        assert len(history.fires) == 1
+        assert history.fires[0].lines == (("beet-salad", 2),)
+        # ...and the stale add still must not stretch the service span.
+        assert history.span(now=now) < DEFAULT_SERVICE_WINDOW
