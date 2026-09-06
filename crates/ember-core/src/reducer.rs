@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::domain::*;
-use crate::engine::seating_obstacle;
+use crate::engine::{dish_obstacle, seating_obstacle};
 use crate::seed;
 
 /// Who performed an action, and at which screen.
@@ -316,6 +316,17 @@ fn apply(state: &PosState, action: &Action) -> Result<PosState, Rejection> {
             let Some(listed) = menu.iter().find(|item| item.id == *menu_item_id) else {
                 return Err(Rejection::UnknownMenuItem);
             };
+
+            // The safety rules are enforced here, not only in the browser.
+            // Until this existed the engine decided which dishes a guest could
+            // be sold and nothing downstream checked: a second terminal, a
+            // replayed action or a direct POST could put an allergen on a
+            // check and fire it. A disabled button is not an enforcement
+            // mechanism.
+            let guest = state.guest(guest_id).ok_or(Rejection::UnknownGuest)?;
+            if let Some(obstacle) = dish_obstacle(guest, listed, &state.ingredients) {
+                return Err(obstacle);
+            }
             let order = next
                 .orders
                 .iter_mut()
@@ -381,6 +392,26 @@ fn apply(state: &PosState, action: &Action) -> Result<PosState, Rejection> {
             }
             if order.lines.is_empty() {
                 return Err(Rejection::OrderEmpty);
+            }
+
+            // Re-checked at the pass, not just when the line was added. A
+            // guest's allergy record can be corrected after the order was
+            // started, and the last thing that should happen then is the
+            // kitchen cooking what the guest already told us not to.
+            //
+            // Stock is deliberately *not* re-checked: the last portion going
+            // while a party was choosing is not a reason to strand them, and
+            // consumption below clamps at zero. Allergens and diet are never
+            // that kind of trade-off.
+            let menu = seed::menu_items();
+            for line in &order.lines {
+                let Some(listed) = menu.iter().find(|item| item.id == line.menu_item_id) else {
+                    continue;
+                };
+                match dish_obstacle(guest, listed, &state.ingredients) {
+                    Some(Rejection::DishUnavailable) | None => {}
+                    Some(unsafe_for_guest) => return Err(unsafe_for_guest),
+                }
             }
             order.status = OrderStatus::Sent;
             order.sent_at = Some(action.at.clone());
@@ -773,6 +804,153 @@ mod tests {
             notes: initial.guest("guest-maya").unwrap().notes.clone(),
         });
         assert_eq!(reduce(&initial, &same_notes), Ok(None));
+    }
+
+    // --- the safety rules, enforced where they cannot be bypassed ----------
+
+    #[test]
+    fn an_allergen_cannot_be_added_to_a_check() {
+        // Maya has a tree-nut allergy; the carrot tartare has hazelnut. The UI
+        // disables this dish for her, and until the reducer checked too, a
+        // second terminal or a direct POST could add it anyway.
+        let initial = state();
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::AddOrderItem {
+                    guest_id: "guest-maya".into(),
+                    menu_item_id: "carrot-tartare".into(),
+                })
+            ),
+            Rejection::DishContainsAllergen
+        );
+    }
+
+    #[test]
+    fn a_dish_that_breaks_a_dietary_need_is_refused() {
+        let mut initial = state();
+        for guest in initial.guests.iter_mut().filter(|g| g.id == "guest-noah") {
+            guest.allergies.clear();
+            guest.dietary_needs = vec!["vegan".into()];
+        }
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::AddOrderItem {
+                    guest_id: "guest-noah".into(),
+                    menu_item_id: "ember-steak".into(),
+                })
+            ),
+            Rejection::DishConflictsWithDiet
+        );
+    }
+
+    #[test]
+    fn a_dish_whose_ingredient_has_run_out_is_refused() {
+        let mut initial = state();
+        for ingredient in initial.ingredients.iter_mut().filter(|i| i.id == "beet") {
+            ingredient.on_hand = 0.0;
+        }
+        assert_eq!(
+            rejection(
+                &initial,
+                &action(ActionKind::AddOrderItem {
+                    guest_id: "guest-noah".into(),
+                    menu_item_id: "beet-salad".into(),
+                })
+            ),
+            Rejection::DishUnavailable
+        );
+    }
+
+    #[test]
+    fn an_allergen_added_before_the_allergy_was_known_cannot_be_fired() {
+        // The order is built, and only then does someone record the allergy —
+        // a correction that happens on a real floor. Firing must refuse, or
+        // the kitchen cooks what the guest has already said not to.
+        let initial = state();
+        let with_line = reduce_opt(
+            &initial,
+            &action(ActionKind::AddOrderItem {
+                guest_id: "guest-noah".into(),
+                menu_item_id: "carrot-tartare".into(),
+            }),
+        )
+        .expect("noah has no allergies in the seed, so this is accepted");
+
+        let mut corrected = with_line;
+        for guest in corrected.guests.iter_mut().filter(|g| g.id == "guest-noah") {
+            guest.allergies = vec!["tree nuts".into()];
+        }
+
+        assert_eq!(
+            rejection(
+                &corrected,
+                &action(ActionKind::SendOrder {
+                    guest_id: "guest-noah".into()
+                })
+            ),
+            Rejection::DishContainsAllergen
+        );
+    }
+
+    #[test]
+    fn running_out_mid_order_does_not_strand_a_party() {
+        // The deliberate asymmetry: an allergen stops a ticket, the last
+        // portion going while the party was choosing does not. Consumption
+        // clamps at zero, and refusing to feed a seated table is the worse
+        // failure.
+        let initial = state();
+        let with_line = reduce_opt(
+            &initial,
+            &action(ActionKind::AddOrderItem {
+                guest_id: "guest-noah".into(),
+                menu_item_id: "beet-salad".into(),
+            }),
+        )
+        .expect("beets are in stock");
+
+        let mut depleted = with_line;
+        for ingredient in depleted.ingredients.iter_mut().filter(|i| i.id == "beet") {
+            ingredient.on_hand = 0.0;
+        }
+
+        let sent = reduce_opt(
+            &depleted,
+            &action(ActionKind::SendOrder {
+                guest_id: "guest-noah".into(),
+            }),
+        );
+        assert!(sent.is_some(), "the ticket should still fire");
+    }
+
+    #[test]
+    fn the_reducer_and_the_engine_never_disagree_about_what_is_safe() {
+        // The failure this guards against is subtle: two copies of the rule
+        // that drift, so a dish shows as blocked on screen and is still
+        // orderable through the API. Checked across every guest and every dish
+        // in the seed.
+        let floor = state();
+        let menu = seed::menu_items();
+
+        for guest in &floor.guests {
+            let ranked = crate::engine::recommend_dishes(guest, &menu, &floor.ingredients);
+            for item in &menu {
+                let engine_says = ranked
+                    .iter()
+                    .find(|dish| dish.id == item.id)
+                    .map(|dish| dish.eligible)
+                    .expect("every menu item is ranked");
+                let reducer_says =
+                    crate::engine::dish_obstacle(guest, item, &floor.ingredients).is_none();
+
+                assert_eq!(
+                    engine_says, reducer_says,
+                    "{} / {} — the ranking and the write path disagree",
+                    guest.id, item.id
+                );
+            }
+        }
     }
 
     // --- ported from components/pos-provider.test.ts ---

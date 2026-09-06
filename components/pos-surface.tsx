@@ -27,7 +27,7 @@ export function PosSurface() {
   }
   return (
     <>
-      <SiteHeader active="pos" />
+      <SiteHeader />
       <PosShell />
       <PosNotice />
     </>

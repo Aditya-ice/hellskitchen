@@ -68,16 +68,16 @@ pub async fn ask(client: &reqwest::Client, base: &str, question: &str) -> AgentA
         Ok(response) if response.status().is_success() => match response.json().await {
             Ok(answer) => answer,
             Err(error) => {
-                eprintln!("could not decode the floor agent response: {error}");
+                tracing::warn!(%error, "could not decode the floor agent response");
                 AgentAnswer::unreachable()
             }
         },
         Ok(response) => {
-            eprintln!("floor agent returned HTTP {}", response.status());
+            tracing::warn!(status = %response.status(), "floor agent returned an error");
             AgentAnswer::unreachable()
         }
         Err(error) => {
-            eprintln!("could not reach the floor agent: {error}");
+            tracing::warn!(%error, "could not reach the floor agent");
             AgentAnswer::unreachable()
         }
     }

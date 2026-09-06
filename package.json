@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:rust": "cargo test",
-    "test:all": "npm run test && npm run test:rust"
+    "test:all": "npm run test && npm run test:rust",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@elevenlabs/client": "^1.17.0",
@@ -25,6 +26,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",

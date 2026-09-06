@@ -61,3 +61,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# Local e2e scratch database
+.e2e/
+test-results/
+playwright-report/

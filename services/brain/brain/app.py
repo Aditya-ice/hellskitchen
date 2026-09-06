@@ -8,6 +8,7 @@ the contract is one health check and one question endpoint.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI
@@ -88,7 +89,7 @@ async def forecast(horizon_minutes: float = 90.0) -> dict[str, object]:
     client = _floor_client()
     try:
         floor = await client.read()
-        history = replay(await client.action_log())
+        history = replay(await client.action_log(), now=datetime.now(UTC))
     except Exception as error:
         print(f"forecast failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}
@@ -120,7 +121,7 @@ async def rank(body: RankRequest) -> dict[str, object]:
             # into this endpoint and looping.
             payload = await client.recommendations(guest["id"], rerank=False)
             dishes = payload.get("dishes", [])
-        history = replay(await client.action_log())
+        history = replay(await client.action_log(), now=datetime.now(UTC))
     except Exception as error:
         print(f"rank failed: {type(error).__name__}: {error}")
         return {"available": False, "reason": "Could not read the service."}

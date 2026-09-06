@@ -7,7 +7,7 @@ than no forecaster.
 
 from datetime import UTC, datetime, timedelta
 
-from brain.history import History, replay
+from brain.history import DEFAULT_SERVICE_WINDOW, History, replay
 
 T0 = datetime(2026, 8, 26, 18, 0, tzinfo=UTC)
 
@@ -162,3 +162,47 @@ class TestAggregates:
     def test_an_empty_log_has_no_span(self):
         assert replay([]).span(now=T0) == timedelta(0)
         assert History().span(now=T0) == timedelta(0)
+
+
+class TestServiceWindow:
+    """The log persists across nights; a service does not."""
+
+    # `entry` builds `at` from a minute offset, so a large negative one puts an
+    # event well before the window opens. The window is 12h; `now` is T0 + 2h,
+    # so the horizon sits at T0 - 10h.
+    STALE_MINUTES = -700
+
+    def test_events_older_than_the_window_are_ignored(self):
+        now = T0 + timedelta(hours=2)
+        history = replay(
+            [
+                add("beet-salad", self.STALE_MINUTES),
+                fire(self.STALE_MINUTES + 1),
+                add("beet-salad", 1),
+                fire(2),
+            ],
+            now=now,
+        )
+
+        # Without a bound, `first_at` was the earliest action ever recorded, so
+        # on day three a burn rate was divided by ~48 hours instead of ~2 and
+        # read about 25x too low -- while still being labelled usable.
+        assert len(history.fires) == 1
+        assert history.span(now=now) < DEFAULT_SERVICE_WINDOW
+
+    def test_a_reset_still_applies_from_outside_the_window(self):
+        now = T0 + timedelta(hours=2)
+
+        # A reset is the strongest statement that what came before is over, so
+        # it is honoured even when it falls outside the window.
+        history = replay(
+            [add("beet-salad", 1), entry("reset", self.STALE_MINUTES), fire(2)],
+            now=now,
+        )
+        assert history.fires == []
+
+    def test_no_now_means_no_window(self):
+        # Callers that do not supply a clock keep the old behaviour rather than
+        # having events silently dropped against an implicit "now".
+        history = replay([add("beet-salad", self.STALE_MINUTES), fire(self.STALE_MINUTES + 1)])
+        assert len(history.fires) == 1

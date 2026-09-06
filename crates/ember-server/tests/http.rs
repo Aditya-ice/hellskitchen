@@ -383,6 +383,67 @@ async fn health_reports_which_integrations_are_configured() {
     );
 }
 
+#[tokio::test]
+async fn a_missing_asset_is_a_404_not_the_html_shell() {
+    let app = app().await;
+    let response = app
+        .send_raw(get("/_next/static/chunks/does-not-exist.js"))
+        .await;
+
+    // Falling through to index.html answered 200 with HTML, so the browser
+    // failed on the MIME type and nothing could tell the asset was gone.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn metrics_are_served_for_a_scraper() {
+    let app = app().await;
+    let (status, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = app.send_raw(get("/metrics")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = String::from_utf8(
+        http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(body.contains("ember_actions_total 1"), "{body}");
+    assert!(body.contains("ember_revision 1"), "{body}");
+    assert!(body.contains("ember_store_errors_total"), "{body}");
+}
+
+#[tokio::test]
+async fn an_allergen_cannot_be_added_over_the_api() {
+    let app = app().await;
+    let (_, _) = send(&app, post("/api/actions", seat("a1", "guest-maya", "t2"))).await;
+
+    // Maya has a tree-nut allergy and the tartare has hazelnut. The browser
+    // disables it; until the reducer checked, a direct POST did not care.
+    let (status, body) = send(
+        &app,
+        post(
+            "/api/actions",
+            json!({
+                "id": "a2",
+                "type": "add-order-item",
+                "guestId": "guest-maya",
+                "menuItemId": "carrot-tartare",
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "rejected");
+    assert_eq!(body["reason"], "dish-contains-allergen");
+}
+
 // --- identity -------------------------------------------------------------
 
 #[tokio::test]

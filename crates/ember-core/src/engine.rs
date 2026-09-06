@@ -175,6 +175,54 @@ fn dietary_conflict(item_tags: &[String], need: &str) -> bool {
     }
 }
 
+/// Why this guest may not be sold this dish, or `None` when they may be.
+///
+/// This is *the* safety rule, and it is deliberately the only copy of it.
+/// `recommend_dishes` calls it to set `eligible`, and the reducer calls it
+/// before a line reaches a check — so a dish cannot be blocked on screen and
+/// still be orderable through the API, which is exactly what happened while the
+/// rule lived only inside the scoring loop.
+///
+/// The order of the checks is the order that matters: an allergen is a
+/// different kind of "no" from a dietary preference, and both are a different
+/// kind of "no" from having run out.
+pub fn dish_obstacle(
+    guest: &GuestProfile,
+    item: &MenuItem,
+    ingredients: &[Ingredient],
+) -> Option<Rejection> {
+    let normalized_allergens: Vec<String> = item
+        .allergens
+        .iter()
+        .map(|value| normalize(value))
+        .collect();
+    if guest
+        .allergies
+        .iter()
+        .any(|allergy| normalized_allergens.contains(&normalize(allergy)))
+    {
+        return Some(Rejection::DishContainsAllergen);
+    }
+
+    if guest
+        .dietary_needs
+        .iter()
+        .any(|need| dietary_conflict(&item.tags, need))
+    {
+        return Some(Rejection::DishConflictsWithDiet);
+    }
+
+    if ingredients
+        .iter()
+        .filter(|ingredient| item.ingredient_ids.contains(&ingredient.id))
+        .any(|ingredient| ingredient.on_hand <= 0.0)
+    {
+        return Some(Rejection::DishUnavailable);
+    }
+
+    None
+}
+
 pub fn recommend_dishes(
     guest: &GuestProfile,
     menu_items: &[MenuItem],
@@ -217,9 +265,9 @@ pub fn recommend_dishes(
                 })
                 .collect();
 
-            let eligible = allergy_matches.is_empty()
-                && dietary_conflicts.is_empty()
-                && unavailable.is_empty();
+            // Asked, not recomputed: one rule, so the engine and the reducer
+            // cannot drift into disagreeing about what is safe to sell.
+            let eligible = dish_obstacle(guest, item, ingredients).is_none();
 
             for allergy in &allergy_matches {
                 warnings.push(format!("Contains guest allergen: {allergy}"));

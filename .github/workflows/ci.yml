@@ -68,6 +68,36 @@ jobs:
       - run: uv run mypy brain
       - run: uv run pytest
 
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      # Playwright drives the local Chrome by default; CI has none, so install
+      # its own Chromium here and point the config at it.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: cargo build --release -p ember-server
+      - run: npm run test:e2e
+        env:
+          CI: "1"
+          PLAYWRIGHT_BROWSER: chromium
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
   desktop:
     name: macOS app builds
     runs-on: macos-latest

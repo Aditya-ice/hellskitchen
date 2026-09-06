@@ -92,6 +92,7 @@ type Shared = Arc<AppState>;
 pub fn router(state: Shared) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/api/auth/setup", post(auth_setup))
         .route("/api/auth/staff/{staff_id}/pin", post(auth_set_pin))
         .route("/api/auth/login", post(auth_login))
@@ -110,7 +111,37 @@ pub fn router(state: Shared) -> Router {
         .route("/api/tavily/search", post(tavily_search))
         .fallback(statics::serve)
         .with_state(state)
+        // Outermost so it also covers the fallback and any rejection: every
+        // request gets a span carrying its own id, which is the only way to
+        // follow one through the log once more than one terminal is busy.
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http().make_span_with(
+                |request: &axum::http::Request<_>| {
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        id = %uuid::Uuid::new_v4(),
+                    )
+                },
+            ),
+        )
+        // A request that never finishes holds a connection and, for the store
+        // routes, a slot behind the global mutex. SSE is exempt: it is
+        // long-lived by design.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        // 2 MB of guest name would be written to the append-only log forever.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
+
+/// How long a non-streaming request may take before it is cut off.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Largest request body accepted, in bytes.
+const MAX_BODY_BYTES: usize = 256 * 1024;
 
 // --- error plumbing -------------------------------------------------------
 
@@ -122,9 +153,14 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Store failures since start. Process-wide because the conversion below has
+/// no handle on `AppState`, and there is one server per process.
+static STORE_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl From<ember_store::StoreError> for ApiError {
     fn from(error: ember_store::StoreError) -> Self {
-        eprintln!("store error: {error}");
+        STORE_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(%error, "store error");
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
             "The POS could not read or write its state.".into(),
@@ -462,6 +498,34 @@ async fn auth_me(
     }))
 }
 
+/// Plain-text counters, in the shape a scraper expects.
+///
+/// Deliberately small: what an operator needs mid-service is how much has
+/// happened, whether the store is erroring, and how many screens are attached —
+/// not a histogram of everything.
+async fn metrics(State(state): State<Shared>) -> ApiResult<String> {
+    let revision = state.store.revision()?;
+    let actions = state.store.action_count()?;
+
+    Ok(format!(
+        "# HELP ember_actions_total Actions committed to the log.\n\
+         # TYPE ember_actions_total counter\n\
+         ember_actions_total {actions}\n\
+         # HELP ember_revision Current floor revision.\n\
+         # TYPE ember_revision gauge\n\
+         ember_revision {}\n\
+         # HELP ember_stream_clients Open event-stream connections.\n\
+         # TYPE ember_stream_clients gauge\n\
+         ember_stream_clients {}\n\
+         # HELP ember_store_errors_total Store failures since start.\n\
+         # TYPE ember_store_errors_total counter\n\
+         ember_store_errors_total {}\n",
+        revision.version,
+        state.updates.receiver_count(),
+        STORE_ERRORS.load(std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
 async fn state_handler(
     State(state): State<Shared>,
     CurrentSession(_): CurrentSession,
@@ -699,7 +763,9 @@ async fn recommendations(
                         "engine"
                     };
                 } else {
-                    eprintln!("floor reranker changed dish eligibility; ignoring its ranking");
+                    tracing::warn!(
+                        "floor reranker altered eligibility or warnings; discarding its ranking"
+                    );
                 }
             }
         }
@@ -941,7 +1007,7 @@ async fn elevenlabs_token(
             Json(serde_json::json!({ "token": token, "configured": true })).into_response()
         }
         Err(error) => {
-            eprintln!("unable to create ElevenLabs token: {error}");
+            tracing::warn!(%error, "unable to create an ElevenLabs token");
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -1015,7 +1081,7 @@ pub async fn serve(state: Shared) -> std::io::Result<()> {
     let listener =
         tokio::net::TcpListener::bind((state.config.host.clone(), state.config.port)).await?;
     let address = listener.local_addr()?;
-    println!("Ember POS server listening on http://{address}");
+    tracing::info!(%address, "ember-server listening");
     serve_on(listener, state).await
 }
 
@@ -1032,7 +1098,36 @@ pub async fn serve_on(listener: tokio::net::TcpListener, state: Shared) -> std::
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
+}
+
+/// Resolves when the process is asked to stop.
+///
+/// Without this, SIGTERM cut in-flight requests and dropped every open event
+/// stream mid-frame. A deploy or a `docker stop` during service would take
+/// whatever was being written with it.
+async fn shutdown_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("the interrupt handler installs");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("the terminate handler installs")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = interrupt => tracing::info!("interrupted; draining"),
+        _ = terminate => tracing::info!("terminating; draining"),
+    }
 }
 
 #[cfg(test)]

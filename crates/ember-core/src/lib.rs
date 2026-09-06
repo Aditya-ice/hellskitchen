@@ -12,7 +12,7 @@ pub mod seed;
 
 pub use domain::*;
 pub use engine::{
-    can_seat_guest_at_table, estimate_wait, order_total, recommend_dishes, recommend_tables,
-    seating_obstacle,
+    can_seat_guest_at_table, dish_obstacle, estimate_wait, order_total, recommend_dishes,
+    recommend_tables, seating_obstacle,
 };
 pub use reducer::{reduce, Action, ActionKind, Actor};

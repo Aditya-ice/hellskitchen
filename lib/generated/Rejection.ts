@@ -12,4 +12,4 @@
  * during a service; what is not acceptable is the second one seeing nothing
  * happen with no explanation.
  */
-export type Rejection = "unknown-guest" | "unknown-table" | "unknown-order" | "unknown-ingredient" | "unknown-menu-item" | "guest-not-expected" | "guest-already-present" | "already-at-that-table" | "guest-not-ready-to-seat" | "table-unavailable" | "table-too-small" | "table-not-accessible" | "no-open-order" | "order-locked" | "order-empty" | "ticket-not-sent" | "invalid-quantity";
+export type Rejection = "unknown-guest" | "unknown-table" | "unknown-order" | "unknown-ingredient" | "unknown-menu-item" | "guest-not-expected" | "guest-already-present" | "already-at-that-table" | "guest-not-ready-to-seat" | "table-unavailable" | "table-too-small" | "table-not-accessible" | "no-open-order" | "order-locked" | "order-empty" | "ticket-not-sent" | "invalid-quantity" | "dish-contains-allergen" | "dish-conflicts-with-diet" | "dish-unavailable";

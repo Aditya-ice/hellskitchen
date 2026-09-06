@@ -93,11 +93,11 @@ pub async fn tavily_context(
     let parsed = match request {
         Ok(response) if response.status().is_success() => response.json::<TavilyResponse>().await,
         Ok(response) => {
-            eprintln!("tavily search failed: HTTP {}", response.status());
+            tracing::warn!(status = %response.status(), "tavily search failed");
             return fallback_context();
         }
         Err(error) => {
-            eprintln!("tavily search failed: {error}");
+            tracing::warn!(%error, "tavily search failed");
             return fallback_context();
         }
     };
@@ -117,7 +117,7 @@ pub async fn tavily_context(
             is_fallback: false,
         },
         Err(error) => {
-            eprintln!("could not decode tavily response: {error}");
+            tracing::warn!(%error, "could not decode tavily response");
             fallback_context()
         }
     }

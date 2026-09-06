@@ -89,21 +89,44 @@ class History:
         return {guest: dict(items) for guest, items in by_guest.items()}
 
 
-def replay(entries: Iterable[dict[str, Any]]) -> History:
-    """Folds the log into a History.
+#: How far back a single service can reasonably reach.
+#:
+#: The log is append-only and persists across nights, so without a bound the
+#: "current service" silently became the entire history of the database: by day
+#: three a burn rate was divided by ~48 hours instead of ~2 and read about 25x
+#: too low, which made every stockout land outside the horizon while the
+#: confidence ladder still called the answer usable.
+DEFAULT_SERVICE_WINDOW = timedelta(hours=12)
+
+
+def replay(
+    entries: Iterable[dict[str, Any]],
+    now: datetime | None = None,
+    window: timedelta = DEFAULT_SERVICE_WINDOW,
+) -> History:
+    """Folds the log into a History covering the current service.
 
     Draft order contents are tracked per guest and snapshotted when the ticket
     is fired. `reset` clears everything, because a reset service shares nothing
     with the one before it — carrying totals across would make the first
     forecast after a reset wrong in a way nobody would spot.
+
+    Events older than `window` are skipped for the same reason: last Tuesday's
+    tickets are not evidence about tonight's carrots.
     """
     history = History()
     drafts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    horizon = (now - window) if now is not None else None
 
     for entry in entries:
         action = entry.get("action", entry)
         at = parse_time(action.get("at"))
         kind = action.get("type")
+
+        # A reset still applies from outside the window: it is the strongest
+        # possible statement that what came before is over.
+        if horizon is not None and at is not None and at < horizon and kind != "reset":
+            continue
 
         if at is not None:
             history.first_at = at if history.first_at is None else min(history.first_at, at)

@@ -60,6 +60,14 @@ pub enum Rejection {
     TicketNotSent,
     /// A restock that is not a positive, finite number.
     InvalidQuantity,
+    /// The dish carries an allergen this guest reacts to.
+    ///
+    /// These three are the safety rules, and unlike the rest of this enum they
+    /// are not procedural objections — they are the reason the system exists.
+    DishContainsAllergen,
+    DishConflictsWithDiet,
+    /// An ingredient the dish needs has run out.
+    DishUnavailable,
 }
 
 impl Rejection {
@@ -83,6 +91,11 @@ impl Rejection {
             Rejection::OrderEmpty => "Add something to the order before sending it.",
             Rejection::TicketNotSent => "That ticket has not been fired yet.",
             Rejection::InvalidQuantity => "Enter a quantity greater than zero.",
+            Rejection::DishContainsAllergen => {
+                "That dish contains something this guest is allergic to."
+            }
+            Rejection::DishConflictsWithDiet => "That dish does not meet this guest's diet.",
+            Rejection::DishUnavailable => "That dish has run out.",
         }
     }
 }

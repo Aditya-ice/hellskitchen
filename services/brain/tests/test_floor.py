@@ -287,3 +287,38 @@ class TestDescribeRecommendations:
         }
         text = describe_recommendations(payload, floor())
         assert "BLOCKED — Contains guest allergen: tree nuts" in text
+
+
+class TestAmbiguousGuestNames:
+    def _floor(self, *names: str):
+        from brain.floor import Floor
+
+        return Floor(
+            version=1,
+            state={
+                "guests": [
+                    {"id": f"guest-{i}", "name": name, "allergies": [], "dietaryNeeds": []}
+                    for i, name in enumerate(names)
+                ]
+            },
+            menu={},
+            summary={},
+        )
+
+    def test_a_unique_partial_still_matches(self):
+        floor = self._floor("Maya Chen", "Noah Reid")
+        found = floor.find_guest("maya")
+        assert found is not None
+        assert found["name"] == "Maya Chen"
+
+    def test_an_ambiguous_partial_is_refused(self):
+        # Returning the first match put the wrong party's allergies in front of
+        # a server, with full confidence and nothing to signal the mistake.
+        floor = self._floor("Maya Chen", "Maya Patel")
+        assert floor.find_guest("maya") is None
+
+    def test_an_exact_name_wins_over_an_ambiguous_partial(self):
+        floor = self._floor("Maya", "Maya Patel")
+        found = floor.find_guest("Maya")
+        assert found is not None
+        assert found["name"] == "Maya"

@@ -79,10 +79,12 @@ class Floor:
         return "—"
 
     def find_guest(self, needle: str) -> dict[str, Any] | None:
-        """Matches on id first, then on name, case-insensitively.
+        """Matches on id first, then on exact name, then on a *unique* partial.
 
         Staff refer to guests by name, so an agent asked about "Maya" must not
-        need the internal id.
+        need the internal id — but a partial that matches two people is not an
+        answer, and returning one of them would put the wrong guest's allergies
+        in front of a server. Ambiguity returns `None` so the agent asks.
         """
         wanted = needle.strip().lower()
         for guest in self.guests():
@@ -91,10 +93,15 @@ class Floor:
         for guest in self.guests():
             if guest["name"].lower() == wanted:
                 return guest
-        for guest in self.guests():
-            if wanted and wanted in guest["name"].lower():
-                return guest
-        return None
+
+        # The substring pass used to return whichever partial match came first.
+        # With two Mayas on the floor that reads out the wrong party's
+        # allergies, with full confidence and no sign anything went wrong.
+        # Ambiguity has to be admitted, not resolved by list order.
+        if not wanted:
+            return None
+        partial = [guest for guest in self.guests() if wanted in guest["name"].lower()]
+        return partial[0] if len(partial) == 1 else None
 
 
 # --- formatters -----------------------------------------------------------
@@ -330,7 +337,38 @@ class FloorClient:
         suffix = "" if rerank else "?rerank=false"
         return await self._get(f"/api/recommendations/{guest_id}{suffix}")
 
-    async def action_log(self, since: int = 0, limit: int = 2000) -> list[dict[str, Any]]:
-        """The append-only log: what the forecaster and reranker learn from."""
-        payload = await self._get(f"/api/actions/log?since={since}&limit={limit}")
-        return _rows(payload, "entries")
+    #: Rows per request. The server clamps to this, so asking for more is moot.
+    PAGE_SIZE = 2000
+
+    async def action_log(self, since: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+        """The append-only log: what the forecaster and reranker learn from.
+
+        Paged to the end rather than asking for one fixed slice. The endpoint is
+        oldest-first, so a single `since=0&limit=2000` request returned the
+        *first* 2000 actions ever recorded — meaning that once a persistent log
+        passed that mark, the forecaster and the reranker were permanently
+        reasoning about ancient history while still reporting themselves
+        available. `limit` caps the total returned, most-recent page last.
+        """
+        collected: list[dict[str, Any]] = []
+        cursor = since
+
+        while True:
+            payload = await self._get(f"/api/actions/log?since={cursor}&limit={self.PAGE_SIZE}")
+            page = _rows(payload, "entries")
+            collected.extend(page)
+
+            if len(page) < self.PAGE_SIZE:
+                break
+
+            next_cursor = page[-1].get("seq")
+            # Without a usable cursor the next request would repeat this page
+            # forever; stopping with what we have beats spinning.
+            if not isinstance(next_cursor, int) or next_cursor <= cursor:
+                break
+            cursor = next_cursor
+
+            if limit is not None and len(collected) >= limit:
+                break
+
+        return collected[-limit:] if limit is not None else collected

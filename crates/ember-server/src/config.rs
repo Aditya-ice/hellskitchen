@@ -2,6 +2,21 @@
 
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error(
+        "EMBER_PORT is {value:?}, which is not a port number. Refusing to start on a \
+         different port than you asked for."
+    )]
+    BadPort { value: String },
+    #[error(
+        "EMBER_DB is not set. Without it the whole service is kept in memory and a restart \
+         loses the night. Set EMBER_DB=/path/to/ember.db, or EMBER_EPHEMERAL=1 if that is \
+         genuinely what you want."
+    )]
+    NoDatabase,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
@@ -54,14 +69,29 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    /// Reads the environment, refusing to start on a misconfiguration.
+    ///
+    /// Both of the checks here used to be silent: a typo in `EMBER_PORT` bound
+    /// 4000 anyway, and an unset `EMBER_DB` ran the entire service in memory
+    /// behind a warning line — losing a night's trading on the next restart. A
+    /// venue cannot be expected to notice either, so neither is a warning now.
+    pub fn from_env() -> Result<Self, ConfigError> {
         let defaults = Config::default();
-        Config {
+        let port = match env("EMBER_PORT") {
+            Some(value) => value.parse().map_err(|_| ConfigError::BadPort { value })?,
+            None => defaults.port,
+        };
+
+        let database = env("EMBER_DB").map(PathBuf::from);
+        // Opting into an in-memory service is fine; doing it by accident is not.
+        if database.is_none() && env("EMBER_EPHEMERAL").as_deref() != Some("1") {
+            return Err(ConfigError::NoDatabase);
+        }
+
+        Ok(Config {
             host: env("EMBER_HOST").unwrap_or(defaults.host),
-            port: env("EMBER_PORT")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(defaults.port),
-            database: env("EMBER_DB").map(PathBuf::from),
+            port,
+            database,
             static_dir: env("EMBER_STATIC_DIR").map(PathBuf::from),
             elevenlabs_key: env("ELEVENLABS_API_KEY"),
             tavily_key: env("TAVILY_API_KEY"),
@@ -74,6 +104,6 @@ impl Config {
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(defaults.trust_forwarded_for),
             brain_url: env("EMBER_BRAIN_URL"),
-        }
+        })
     }
 }

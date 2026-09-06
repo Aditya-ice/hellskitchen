@@ -53,10 +53,16 @@ fn main() {
                 );
             }
 
+            // Not `Config::from_env`: that refuses to start without EMBER_DB,
+            // which is the right answer for the standalone server and the
+            // wrong one here — the desktop app always supplies its own
+            // database path below, and a Finder launch has no environment to
+            // read anyway.
             let server = AppState::new(Config {
                 database: Some(database_path(app.handle())),
                 static_dir,
-                ..Config::from_env()
+                brain_url: std::env::var("EMBER_BRAIN_URL").ok(),
+                ..Config::default()
             })?;
 
             let desktop = Desktop {
