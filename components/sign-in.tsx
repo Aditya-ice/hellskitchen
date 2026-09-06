@@ -54,6 +54,7 @@ export function SignIn({ onSignedIn, reason }: SignInProps) {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [staffId, setStaffId] = useState("");
   const [pin, setPin] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const liveRegion = useRef<HTMLParagraphElement>(null);
@@ -78,11 +79,12 @@ export function SignIn({ onSignedIn, reason }: SignInProps) {
 
   const submit = async () => {
     if (pin.length < MIN_PIN || !staffId.trim() || busy) return;
+    if (needsSetup && !setupToken.trim()) return;
     setBusy(true);
     setError(null);
     try {
       if (needsSetup) {
-        await setupFirstManager(staffId.trim(), pin);
+        await setupFirstManager(staffId.trim(), pin, setupToken.trim());
       }
       await login(staffId.trim(), pin, terminalId());
       onSignedIn();
@@ -125,6 +127,14 @@ export function SignIn({ onSignedIn, reason }: SignInProps) {
             : "Every action on the floor is recorded against whoever is signed in."}
         </p>
 
+        {needsSetup ? (
+          <p className="mt-2 text-xs text-ink-muted">
+            The setup code is printed in the server&rsquo;s console when it
+            starts. It is what stops anyone else on the network claiming this
+            terminal first.
+          </p>
+        ) : null}
+
         {reason ? (
           <p className="mt-3 rounded-xl bg-warning/12 px-3 py-2 text-xs font-bold text-[#8a5b06]">
             {reason}
@@ -138,6 +148,26 @@ export function SignIn({ onSignedIn, reason }: SignInProps) {
             void submit();
           }}
         >
+          {needsSetup ? (
+            <div>
+              <label
+                htmlFor="setup-token"
+                className="text-[11px] font-black uppercase tracking-wider text-ink-muted"
+              >
+                Setup code
+              </label>
+              <input
+                id="setup-token"
+                value={setupToken}
+                onChange={(event) => setSetupToken(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                className="mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 font-mono text-xs"
+                placeholder="From the server console"
+              />
+            </div>
+          ) : null}
+
           <div>
             <label
               htmlFor="staff-id"
@@ -219,7 +249,12 @@ export function SignIn({ onSignedIn, reason }: SignInProps) {
 
           <button
             type="submit"
-            disabled={busy || pin.length < MIN_PIN || !staffId.trim()}
+            disabled={
+              busy ||
+              pin.length < MIN_PIN ||
+              !staffId.trim() ||
+              (needsSetup && !setupToken.trim())
+            }
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-3 text-sm font-black text-white hover:bg-accent-dark disabled:bg-line disabled:text-ink-muted"
           >
             {busy ? (

@@ -45,8 +45,13 @@ export default defineConfig({
 
   webServer: {
     // A fresh database per run, so a test never inherits a previous floor.
+    //
+    // EMBER_SETUP_TOKEN is a test-only convenience: the real bootstrap code is
+    // random and printed to the console, so a spec has no way to learn it.
+    // Seeding the manager PIN up front skips that path, which has its own
+    // coverage in the Rust tests.
     command:
-      "rm -f .e2e/ember.db* && EMBER_DB=.e2e/ember.db EMBER_STATIC_DIR=./out ./target/release/ember-server",
+      "rm -f .e2e/ember.db* && EMBER_DB=.e2e/ember.db EMBER_SETUP_TOKEN=e2e-setup-token EMBER_STATIC_DIR=./out ./target/release/ember-server",
     url: "http://127.0.0.1:4000/api/health",
     reuseExistingServer: false,
     timeout: 120_000,

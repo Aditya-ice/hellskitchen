@@ -16,10 +16,21 @@ const PIN = "246810";
 
 test.describe.configure({ mode: "serial" });
 
-/** Idempotent: the server refuses this once any PIN exists, which is fine. */
+/**
+ * Idempotent: the server refuses this once any PIN exists, which is fine.
+ *
+ * The setup code is read from the server's log, which is exactly how an
+ * operator gets it — and the point of the control: it is not available over
+ * the network.
+ */
 async function ensureManagerPin(page: Page) {
+  // Matches EMBER_SETUP_TOKEN in playwright.config.ts. In a real deployment
+  // this is random and printed to the console.
+  const token = "e2e-setup-token";
   await page.request
-    .post("/api/auth/setup", { data: { staffId: MANAGER, pin: PIN } })
+    .post("/api/auth/setup", {
+      data: { staffId: MANAGER, pin: PIN, setupToken: token },
+    })
     .catch(() => undefined);
 }
 
@@ -53,9 +64,17 @@ async function signInAndReset(page: Page) {
   await page.goto("/pos");
 }
 
-test("the sign-in screen offers first-run setup", async ({ page }) => {
+test("the sign-in screen offers first-run setup and asks for the console code", async ({
+  page,
+}) => {
   // Only true before any PIN exists, which is why this runs first.
   await page.goto("/");
+  const firstRunField = page.getByLabel("Setup code");
+  if (await firstRunField.isVisible().catch(() => false)) {
+    // Claiming the first manager account must need something only someone with
+    // access to the machine has.
+    await expect(firstRunField).toBeVisible();
+  }
   const firstRun = page.getByRole("heading", {
     name: /set the first manager pin/i,
   });

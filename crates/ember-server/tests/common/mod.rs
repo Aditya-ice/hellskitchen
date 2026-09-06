@@ -37,6 +37,8 @@ pub async fn signed_in(config: Config) -> TestApp {
 /// A router signed in as a particular staff member, for role-gating tests.
 pub async fn signed_in_as(config: Config, staff_id: &str, pin: &str) -> TestApp {
     let state = AppState::new(config).expect("in-memory store");
+    // Set directly on the store: the HTTP bootstrap needs the console token,
+    // which is the point of it, and the tests are not exercising that path here.
     state
         .store
         .set_staff_pin(staff_id, pin, Utc::now())

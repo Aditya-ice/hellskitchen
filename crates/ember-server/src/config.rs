@@ -39,6 +39,12 @@ pub struct Config {
     /// actually sets it; otherwise any client can choose its own rate-limit
     /// identity just by sending the header.
     pub trust_forwarded_for: bool,
+    /// Pins the first-run setup code instead of generating one.
+    ///
+    /// For provisioning from a script. Without it the code is random and only
+    /// reachable from the server's console, which is what stops whoever
+    /// reaches the port first from claiming the manager account.
+    pub setup_token: Option<String>,
     /// Base URL of the optional Python service. The POS works without it.
     pub brain_url: Option<String>,
 }
@@ -63,6 +69,7 @@ impl Default for Config {
             tavily_base: "https://api.tavily.com".into(),
             secure_cookies: false,
             trust_forwarded_for: false,
+            setup_token: None,
             brain_url: None,
         }
     }
@@ -96,6 +103,7 @@ impl Config {
             trust_forwarded_for: env("EMBER_TRUST_PROXY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(defaults.trust_forwarded_for),
+            setup_token: env("EMBER_SETUP_TOKEN"),
             brain_url: env("EMBER_BRAIN_URL"),
         }
     }
@@ -134,6 +142,7 @@ impl Config {
             trust_forwarded_for: env("EMBER_TRUST_PROXY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(defaults.trust_forwarded_for),
+            setup_token: env("EMBER_SETUP_TOKEN"),
             brain_url: env("EMBER_BRAIN_URL"),
         })
     }

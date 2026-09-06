@@ -396,16 +396,23 @@ export async function setStaffPin(staffId: string, pin: string): Promise<void> {
   await readJson<unknown>(response, "set that PIN");
 }
 
-/** First run only: the server refuses this once any PIN exists. */
+/**
+ * First run only: the server refuses this once any PIN exists.
+ *
+ * `setupToken` is printed to the server's console at startup. It is what stops
+ * whoever reaches the port first from claiming the manager account on a freshly
+ * deployed venue network.
+ */
 export async function setupFirstManager(
   staffId: string,
   pin: string,
+  setupToken: string,
 ): Promise<void> {
   const response = await fetch(apiUrl("/api/auth/setup"), {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ staffId, pin }),
+    body: JSON.stringify({ staffId, pin, setupToken }),
   });
   await readJson<unknown>(response, "set the first PIN");
 }

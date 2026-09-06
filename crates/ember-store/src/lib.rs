@@ -134,6 +134,27 @@ CREATE INDEX sessions_expires_idx ON sessions (expires_at);
 "#,
     },
     Migration {
+        name: "bootstrap token and per-identifier login attempts",
+        sql: r#"
+-- Claiming the first manager PIN used to need nothing but reaching the port
+-- first. This holds a one-time secret printed to the server console at startup,
+-- so the person who can read that console is the only one who can claim it.
+CREATE TABLE bootstrap (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT NOT NULL
+);
+
+-- Failed sign-ins are tracked per *attempted* identifier, whether or not it
+-- exists. Keeping the counter on staff_credentials meant only a real id could
+-- ever lock, so six wrong guesses told an attacker which ids were real.
+CREATE TABLE login_attempts (
+    staff_id     TEXT PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT
+);
+"#,
+    },
+    Migration {
         name: "record who performed each action",
         sql: r#"
 -- The log recorded what happened and never who did it, so the audit trail

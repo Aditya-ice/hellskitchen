@@ -34,6 +34,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = AppState::new(config)?;
+
+    // Printed, not served: this is what stops the first client to reach a
+    // freshly deployed server from claiming the manager account. Whoever can
+    // read this console is the only one who can complete setup.
+    if let Some(token) = state.store.bootstrap_token()? {
+        tracing::warn!(
+            "FIRST RUN — nobody has a PIN yet. Setup code for the first manager: {token}"
+        );
+    }
+
+    if !state.config.secure_cookies {
+        tracing::warn!(
+            "EMBER_SECURE_COOKIES is not set, so the session cookie is sent in the clear. \
+             Anyone on the same network can read it and take over a terminal. Serve this \
+             over https in a venue."
+        );
+    }
+
     ember_server::serve(state).await?;
     Ok(())
 }

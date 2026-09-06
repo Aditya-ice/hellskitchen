@@ -64,9 +64,6 @@ pub enum AuthOutcome {
     LockedOut {
         until: DateTime<Utc>,
     },
-    /// No such staff member, or they have no PIN set. Deliberately one variant:
-    /// telling a caller which would let them enumerate the roster.
-    UnknownStaff,
 }
 
 fn hash_token(token: &str) -> String {
@@ -97,6 +94,13 @@ impl Store {
             .to_string();
 
         let connection = self.lock()?;
+        // Spent: there is exactly one first PIN, and this is it.
+        connection.execute("DELETE FROM bootstrap", [])?;
+        // A manager resetting the PIN is how a locked-out colleague gets back
+        // on the floor mid-service, so it has to clear the lockout too. The
+        // counter lives in its own table now, so clearing the credential row
+        // no longer does this on its own.
+        connection.execute("DELETE FROM login_attempts WHERE staff_id = ?1", [staff_id])?;
         // The urgent reason to change a PIN is that someone saw it typed. That
         // is exactly the case where the sessions it already opened must die
         // with it, rather than idling out over the next half hour.
@@ -106,10 +110,57 @@ impl Store {
              VALUES (?1, ?2, 0, NULL, ?3)
              ON CONFLICT(staff_id) DO UPDATE SET
                  pin_hash = excluded.pin_hash,
-                 failed_count = 0,
-                 locked_until = NULL,
                  updated_at = excluded.updated_at",
             (staff_id, &hash, now.to_rfc3339()),
+        )?;
+        Ok(())
+    }
+
+    /// The one-time secret that authorises claiming the first PIN.
+    ///
+    /// `None` once any credential exists. Minted on first request and printed
+    /// to the server console at startup, so the person standing at the machine
+    /// is the one who can claim it — before this, the first client to reach the
+    /// port on a freshly deployed venue network simply became the manager.
+    pub fn bootstrap_token(&self) -> Result<Option<String>> {
+        if self.has_any_credentials()? {
+            return Ok(None);
+        }
+
+        let connection = self.lock()?;
+        let existing: Option<String> = connection
+            .query_row("SELECT token FROM bootstrap WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+
+        if let Some(token) = existing {
+            return Ok(Some(token));
+        }
+
+        let token = new_token();
+        connection.execute("INSERT INTO bootstrap (id, token) VALUES (1, ?1)", [&token])?;
+        Ok(Some(token))
+    }
+
+    /// Pins the bootstrap token to a known value.
+    ///
+    /// For a deployment that provisions the first manager from a script rather
+    /// than by reading a console. Ignored once any credential exists, so it
+    /// cannot be used to re-open setup on a running venue.
+    pub fn set_bootstrap_token(&self, token: &str) -> Result<()> {
+        if self.has_any_credentials()? {
+            return Ok(());
+        }
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO bootstrap (id, token) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET token = excluded.token",
+            [token],
         )?;
         Ok(())
     }
@@ -125,6 +176,13 @@ impl Store {
     }
 
     /// Verifies a PIN and, on success, opens a session.
+    ///
+    /// Failed attempts are counted against the *attempted identifier*, whether
+    /// or not anyone by that name exists. That is what makes an invented id
+    /// indistinguishable from a real one: both count down, both lock, and both
+    /// answer the same way at every step. Keeping the counter on the credential
+    /// row meant only a real id could ever lock, so six wrong guesses told an
+    /// attacker exactly which identifiers were on the roster.
     pub fn authenticate(
         &self,
         staff_id: &str,
@@ -134,26 +192,19 @@ impl Store {
     ) -> Result<AuthOutcome> {
         let connection = self.lock()?;
 
-        let row: Option<(String, i64, Option<String>)> = connection
+        let attempts: Option<(i64, Option<String>)> = connection
             .query_row(
-                "SELECT pin_hash, failed_count, locked_until FROM staff_credentials WHERE staff_id = ?1",
+                "SELECT failed_count, locked_until FROM login_attempts WHERE staff_id = ?1",
                 [staff_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map(Some)
             .or_else(|error| match error {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(other),
             })?;
+        let (mut failed_count, locked_until) = attempts.unwrap_or((0, None));
 
-        let Some((pin_hash, failed_count, locked_until)) = row else {
-            // Spend the same work on an unknown staff id as on a known one, so
-            // response time does not reveal who is on the roster.
-            let _ = Argon2::default().verify_password(pin.as_bytes(), &dummy_hash());
-            return Ok(AuthOutcome::UnknownStaff);
-        };
-
-        let mut failed_count = failed_count;
         if let Some(until) = locked_until
             .as_deref()
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -167,23 +218,51 @@ impl Store {
             // immediately, with no warning -- repeatable indefinitely, so one
             // mistake earlier in the night keeps costing someone the floor.
             connection.execute(
-                "UPDATE staff_credentials SET failed_count = 0, locked_until = NULL WHERE staff_id = ?1",
+                "UPDATE login_attempts SET failed_count = 0, locked_until = NULL \
+                 WHERE staff_id = ?1",
                 [staff_id],
             )?;
             failed_count = 0;
         }
 
-        let parsed = PasswordHash::new(&pin_hash).map_err(|_| StoreError::PasswordHash)?;
-        if Argon2::default()
-            .verify_password(pin.as_bytes(), &parsed)
-            .is_err()
-        {
+        let stored: Option<String> = connection
+            .query_row(
+                "SELECT pin_hash FROM staff_credentials WHERE staff_id = ?1",
+                [staff_id],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+
+        // Spend the same work on an unknown id as on a known one, so response
+        // time does not reveal who is on the roster either.
+        let verified = match stored.as_deref() {
+            Some(hash) => {
+                let parsed = PasswordHash::new(hash).map_err(|_| StoreError::PasswordHash)?;
+                Argon2::default()
+                    .verify_password(pin.as_bytes(), &parsed)
+                    .is_ok()
+            }
+            None => {
+                let _ = Argon2::default().verify_password(pin.as_bytes(), &dummy_hash());
+                false
+            }
+        };
+
+        if !verified {
             let failures = failed_count + 1;
             let lock_until = (failures >= MAX_FAILED_ATTEMPTS)
                 .then(|| (now + Duration::minutes(LOCKOUT_MINUTES)).to_rfc3339());
 
             connection.execute(
-                "UPDATE staff_credentials SET failed_count = ?2, locked_until = ?3 WHERE staff_id = ?1",
+                "INSERT INTO login_attempts (staff_id, failed_count, locked_until) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(staff_id) DO UPDATE SET \
+                     failed_count = excluded.failed_count, \
+                     locked_until = excluded.locked_until",
                 (staff_id, failures, lock_until.as_deref()),
             )?;
 
@@ -199,10 +278,7 @@ impl Store {
             });
         }
 
-        connection.execute(
-            "UPDATE staff_credentials SET failed_count = 0, locked_until = NULL WHERE staff_id = ?1",
-            [staff_id],
-        )?;
+        connection.execute("DELETE FROM login_attempts WHERE staff_id = ?1", [staff_id])?;
 
         // Opportunistic, and the natural moment for it: sign-in is rare, and
         // without this the table gains a permanent row per session for the life
@@ -566,14 +642,64 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_staff_id_is_indistinguishable_from_a_wrong_pin() {
+    fn an_unknown_id_counts_down_and_locks_exactly_like_a_real_one() {
         let store = store_with_pin("2468");
+
+        // Same countdown, same wording, same shape. Previously an invented id
+        // returned a distinct outcome and could never lock, so six guesses
+        // sorted the roster from the rest.
+        for expected in (1..MAX_FAILED_ATTEMPTS).rev() {
+            assert_eq!(
+                store
+                    .authenticate("not-a-person", "0000", "pass-1", now())
+                    .unwrap(),
+                AuthOutcome::WrongPin {
+                    attempts_remaining: expected
+                }
+            );
+        }
+        let invented = store
+            .authenticate("not-a-person", "0000", "pass-1", now())
+            .unwrap();
+        assert!(matches!(invented, AuthOutcome::LockedOut { .. }));
+
+        // And a real id behaves identically at every step.
+        for expected in (1..MAX_FAILED_ATTEMPTS).rev() {
+            assert_eq!(
+                store
+                    .authenticate("server-1", "0000", "pass-1", now())
+                    .unwrap(),
+                AuthOutcome::WrongPin {
+                    attempts_remaining: expected
+                }
+            );
+        }
+        let real = store
+            .authenticate("server-1", "0000", "pass-1", now())
+            .unwrap();
+        assert!(matches!(real, AuthOutcome::LockedOut { .. }));
+    }
+
+    #[test]
+    fn a_bootstrap_token_exists_only_until_the_first_pin_is_set() {
+        let store = Store::in_memory().unwrap();
+
+        let token = store
+            .bootstrap_token()
+            .unwrap()
+            .expect("a fresh terminal offers one");
+        assert_eq!(token.len(), 64, "expected a 32-byte token in hex");
+        // Stable across reads, so the console value stays valid.
         assert_eq!(
-            store
-                .authenticate("nobody", "2468", "pass-1", now())
-                .unwrap(),
-            AuthOutcome::UnknownStaff
+            store.bootstrap_token().unwrap().as_deref(),
+            Some(&token[..])
         );
+
+        store.set_staff_pin("manager-1", "246810", now()).unwrap();
+
+        // Spent. Without this, anyone who saw the console once could claim a
+        // second "first" PIN after a credential was wiped.
+        assert_eq!(store.bootstrap_token().unwrap(), None);
     }
 
     #[test]

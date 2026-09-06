@@ -58,6 +58,9 @@ impl AppState {
             }
             None => Store::in_memory()?,
         };
+        if let Some(token) = config.setup_token.as_deref() {
+            store.set_bootstrap_token(token)?;
+        }
         let (updates, _) = broadcast::channel(SSE_CHANNEL_CAPACITY);
 
         Ok(Arc::new(Self {
@@ -227,6 +230,9 @@ async fn health(State(state): State<Shared>) -> ApiResult<Json<Health>> {
 struct Credentials {
     staff_id: String,
     pin: String,
+    /// Only read by `auth_setup`. Printed to the server console at startup.
+    #[serde(default)]
+    setup_token: Option<String>,
     /// Which screen this is. Free-form, so a venue can label the pass, the host
     /// stand and the bar however it likes; it lands in the audit trail beside
     /// the staff id.
@@ -281,10 +287,26 @@ async fn auth_setup(
         )
     })?;
 
-    if state.store.has_any_credentials()? {
+    let Some(expected) = state.store.bootstrap_token()? else {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "This terminal already has staff PINs. Ask a manager to add yours.".into(),
+        ));
+    };
+
+    // The token is the whole control here. This route cannot require a session
+    // -- there is nobody to be yet -- and `require_same_origin` lets through
+    // anything without an Origin header, so without it the first client to
+    // reach a freshly deployed server simply became the manager. The token is
+    // printed to the server console, so claiming the first PIN needs access to
+    // the machine rather than to the network.
+    let offered = credentials.setup_token.as_deref().unwrap_or_default();
+    if !constant_time_eq(offered.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "That setup code is not right. It is printed in the server's console \
+             when it starts."
+                .into(),
         ));
     }
 
@@ -418,9 +440,20 @@ async fn auth_login(
             )
         })?;
 
+    // Free-form, client-supplied, and it lands in the audit trail on every
+    // action from this session -- so it is bounded and stripped of anything
+    // that is not a plain label.
     let terminal = credentials
         .terminal_id
-        .clone()
+        .as_deref()
+        .map(|value| {
+            value
+                .trim()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
+                .take(64)
+                .collect::<String>()
+        })
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unnamed-terminal".into());
 
@@ -449,20 +482,16 @@ async fn auth_login(
             );
             Ok(response)
         }
-        // These two answer identically and take the same time.
+        // A wrong PIN and an invented staff id are now genuinely
+        // indistinguishable: failures are counted against the identifier that
+        // was attempted, whether or not anyone by that name exists, so both
+        // count down and both lock. Previously only a real id could lock, and
+        // six guesses sorted the roster from the rest regardless of what these
+        // messages said.
         //
-        // That is not, on its own, enough to stop someone enumerating the
-        // roster: only a real staff id can lock, so six wrong guesses still
-        // separate a real id (423) from an invented one (401). Closing that
-        // properly would mean either tracking failures for ids that do not
-        // exist, or refusing to tell a member of staff why their PIN stopped
-        // working for five minutes.
-        //
-        // The second is the worse trade. The roster is five names on a venue
-        // LAN and knowing them buys an attacker nothing they can use — the
-        // lockout is what stops guessing — whereas a server locked out mid
-        // service with no explanation is a genuine failure, every service. So
-        // the count is here deliberately, and the enumeration is accepted.
+        // The remaining-attempts count is therefore safe to keep, and it is
+        // worth keeping: a server locked out mid-service with no warning is a
+        // real failure, every service.
         AuthOutcome::WrongPin { attempts_remaining } => Err(ApiError(
             StatusCode::UNAUTHORIZED,
             format!(
@@ -470,10 +499,6 @@ async fn auth_login(
                  account locks.",
                 if attempts_remaining == 1 { "" } else { "s" }
             ),
-        )),
-        AuthOutcome::UnknownStaff => Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "That PIN was not recognised.".into(),
         )),
         AuthOutcome::LockedOut { until } => Err(ApiError(
             StatusCode::LOCKED,
@@ -522,6 +547,7 @@ async fn auth_me(
             "authenticated": false,
             // Drives first-run: with no PINs at all there is nothing to sign in
             // to, and the UI shows setup instead of a login it cannot satisfy.
+            // Safe to expose, because setup now needs the console token.
             "needsSetup": !state.store.has_any_credentials().unwrap_or(false),
         }),
     }))
@@ -587,6 +613,17 @@ struct ActionOutcome {
     reason_message: Option<&'static str>,
     #[serde(flatten)]
     revision: Revision,
+}
+
+/// Compares two byte strings without leaking where they first differ.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 /// The role a staff id carries, if the roster knows them.

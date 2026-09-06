@@ -374,7 +374,7 @@ async fn health_reports_which_integrations_are_configured() {
     // A database that failed to migrate is the kind of thing a health check
     // exists to catch, so the schema version is part of the contract. Bump this
     // deliberately when a migration is added — that is the point of it.
-    assert_eq!(body["schemaVersion"], 3);
+    assert_eq!(body["schemaVersion"], 4);
     assert!(
         body["build"]
             .as_str()
@@ -586,6 +586,50 @@ async fn setup_is_refused_once_a_credential_exists() {
         ))
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn claiming_the_first_pin_needs_the_console_token() {
+    // A server nobody has set up yet: exactly the state a freshly deployed
+    // venue machine is in, and the window in which the first client to reach
+    // the port used to become the manager.
+    let state =
+        ember_server::AppState::new(ember_server::Config::default()).expect("in-memory store");
+    let token = state
+        .store
+        .bootstrap_token()
+        .unwrap()
+        .expect("a fresh terminal offers one");
+    let router = ember_server::router(state);
+
+    let send = |body: serde_json::Value| {
+        let router = router.clone();
+        async move {
+            let response = router.oneshot(post("/api/auth/setup", body)).await.unwrap();
+            response.status()
+        }
+    };
+
+    // No token, and a wrong one.
+    assert_eq!(
+        send(json!({ "staffId": "manager-1", "pin": "246810" })).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(json!({ "staffId": "manager-1", "pin": "246810", "setupToken": "guess" })).await,
+        StatusCode::FORBIDDEN
+    );
+
+    // The real one, once.
+    assert_eq!(
+        send(json!({ "staffId": "manager-1", "pin": "246810", "setupToken": token.clone() })).await,
+        StatusCode::CREATED
+    );
+    // And it is spent: a replay cannot claim a second "first" PIN.
+    assert_eq!(
+        send(json!({ "staffId": "server-1", "pin": "135791", "setupToken": token })).await,
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]
